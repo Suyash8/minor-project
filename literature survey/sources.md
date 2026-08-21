@@ -6,6 +6,14 @@ the saved filename, what the source contains, and what was learned from it (in m
 words, not verbatim reproduction). Papers are grouped by the use case they were researched
 under (see `findings.md` for the narrowed scope and synthesis).
 
+**Scope note:** the survey is scoped to the **software** side of AV object detection -
+algorithms, architectures, training strategies, datasets, and software-level optimization.
+Hardware topics (physical sensor units and mounting, embedded board/accelerator selection)
+are out of scope. Source summaries below still describe each source's full contents
+accurately, including any hardware material it covers, but only software-relevant findings
+are carried into `findings.md`; where a source straddles the boundary that is flagged in
+its entry.
+
 Research method: search engine queries were run per use-case area (2D detection, 3D/LiDAR
 detection, sensor fusion, adverse weather, VRU/pedestrian detection, edge deployment,
 benchmark datasets). Candidate papers were shortlisted from arXiv, MDPI, PMC, and
@@ -70,10 +78,15 @@ instead, and that limitation is noted explicitly below rather than glossed over.
   (MobileNet V1, MobileDet) across Raspberry Pi 3/4/5 (with/without Coral TPU and AI HAT+),
   Jetson Nano, and Jetson Orin Nano, measuring energy use, inference time, and accuracy,
   including how accuracy degrades as scene object-count grows.
-- Takeaway: SSD-MobileNetV1 is fastest/lowest-energy but least accurate; YOLOv8-Medium is
-  most accurate but heaviest; TPUs help SSD/EfficientDet more than YOLOv8; Jetson Orin Nano
-  gives the best overall accuracy/latency/energy balance. Directly answers "what actually
-  runs in real time on embedded AV-class hardware" for the edge-deployment use case.
+- Takeaway (software-relevant, used in findings): lightweight SSD-MobileNet variants are
+  fastest but least accurate while larger YOLOv8 variants are most accurate at higher
+  compute cost, and the accuracy gap between light and heavy models widens as scene
+  object-count rises — so model-family selection is an explicit accuracy-vs-latency
+  decision, and lightweight models degrade disproportionately in dense scenes.
+- **Scope flag:** this paper also ranks specific hardware platforms and accelerators
+  (Raspberry Pi variants, Coral TPU, AI HAT+, Jetson Nano / Orin Nano). That hardware
+  comparison is **out of scope** for this survey and is deliberately not carried into
+  `findings.md`; only the model-level trade-offs above are used.
 
 ---
 
@@ -262,28 +275,13 @@ All images below were sourced from Wikimedia Commons and verified to carry an op
 (CC BY 4.0 or CC0) before download, with attribution captured here as required by the
 license terms.
 
-### 7.1 Zoox AV sensor close-up
-- Link: https://commons.wikimedia.org/wiki/File:Zoox_Toyota_Highlander_Test_Vehicle_-_Sensor_Closeup_-_San_Francisco,_May_2025_07.jpg
-- Downloaded as: `images/Zoox_AV_sensor_closeup_CC-BY4.0.jpg` (6.3 MB)
-- License: CC BY 4.0. Author: Wikimedia Commons user "9yz". Attribution required.
-- Contents: A close-up photo of the camera and LiDAR sensor cluster mounted on the rear of
-  a Toyota Highlander modified as a Zoox self-driving test vehicle in San Francisco.
-- Takeaway: Real-world reference for what a production-grade AV sensor cluster physically
-  looks like (multiple stacked camera + spinning/solid-state LiDAR units) — grounds the
-  "camera+LiDAR fusion" discussion in something concrete rather than only diagrams.
+Because this survey is scoped to software only (see the scope note at the top of
+`findings.md`), the software-relevant image is listed first as §7.1 and is the only one
+cited in the findings. The two sensor-hardware photographs originally gathered are
+retained below under §7.2 for provenance and completeness, but are marked out of scope and
+are not relied on for any claim in `findings.md`.
 
-### 7.2 Yandex AV roof LiDAR unit
-- Link: https://commons.wikimedia.org/wiki/File:Moscow,_Yandex_self-driving_Hyundai_Sonata,_Aug_2025_roof_unit_01.jpg
-- Downloaded as: `images/Yandex_AV_roof_lidar_unit_CC0.jpg` (338 KB)
-- License: CC0 / Public Domain Dedication. Author: Wikimedia Commons user "Retired
-  electrician". No attribution legally required, credited here regardless as good practice.
-- Contents: Photo of the roof-mounted LiDAR/sensor unit on a Yandex self-driving Hyundai
-  Sonata operating in Moscow, taken August 2025.
-- Takeaway: A second, independent real-world example of a rooftop LiDAR sensor pod design,
-  useful for comparing sensor-mounting strategies across different AV operators (Zoox vs.
-  Yandex).
-
-### 7.3 One-stage vs two-stage object detector architecture diagram
+### 7.1 One-stage vs two-stage object detector architecture diagram
 - Link: https://commons.wikimedia.org/wiki/File:Object_detector_1stage_vs_2_stage.png
 - Downloaded as: `images/ObjectDetector_1stage_vs_2stage_CC-BY4.0.png` (110 KB)
 - License: CC BY 4.0. Credited to Licheng Jiao, Fan Zhang, Fang Liu, Shuyuan Yang, sourced
@@ -295,6 +293,26 @@ license terms.
 - Takeaway: A clean visual explanation of exactly why one-stage detectors (SSD, YOLO
   family) are preferred for AV real-time use over two-stage detectors — fewer sequential
   steps means lower latency, at some accuracy cost that later architectures try to recover.
+
+### 7.2 Sensor-hardware photographs (OUT OF SCOPE — retained for provenance only)
+
+These two images were downloaded earlier, before the survey was narrowed to software only.
+They document physical sensor hardware, which is outside the current scope, so they are
+**not cited anywhere in `findings.md`**. They are left in `images/` and logged here rather
+than silently deleted, so the record of what was downloaded stays accurate. They can be
+removed if a strictly software-only artifact set is wanted.
+
+- **Zoox AV sensor close-up** — `images/Zoox_AV_sensor_closeup_CC-BY4.0.jpg` (6.3 MB).
+  Link: https://commons.wikimedia.org/wiki/File:Zoox_Toyota_Highlander_Test_Vehicle_-_Sensor_Closeup_-_San_Francisco,_May_2025_07.jpg
+  License: CC BY 4.0, author Wikimedia Commons user "9yz", attribution required.
+  Contents: close-up of the camera and LiDAR sensor cluster on a Toyota Highlander used as
+  a Zoox self-driving test vehicle. Out of scope: sensor hardware, not software.
+- **Yandex AV roof LiDAR unit** — `images/Yandex_AV_roof_lidar_unit_CC0.jpg` (338 KB).
+  Link: https://commons.wikimedia.org/wiki/File:Moscow,_Yandex_self-driving_Hyundai_Sonata,_Aug_2025_roof_unit_01.jpg
+  License: CC0 / Public Domain Dedication, author Wikimedia Commons user "Retired
+  electrician"; credited here as good practice though not legally required.
+  Contents: roof-mounted LiDAR/sensor unit on a Yandex self-driving Hyundai Sonata in
+  Moscow. Out of scope: sensor hardware, not software.
 
 ---
 

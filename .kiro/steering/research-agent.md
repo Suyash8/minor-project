@@ -23,6 +23,19 @@ Key non-negotiables from that skill, restated here so they apply even to quick r
 - If an approach fails twice (a search, a download, a command), diagnose the root cause
   before trying a third time rather than repeating the same failing approach.
 
+## Shell and environment (avoid known fumbles)
+
+The shell here is **fish, not bash**. Do not use `declare -A`, `VAR=value`, `export`,
+`$?`, or bash heredocs — they fail or misbehave. Use `set VAR value`, `$status`, and
+`for ...; end`; for any loop, array, or multi-step script, wrap it as
+`bash -c '<script>'` rather than hand-translating it. Simple `&&`/`||`/`;` chains are fine.
+
+Also: the file-reading tools **cannot read `/tmp`** — write scratch output inside the
+workspace, read it, then delete it. A file may not be readable on the very first attempt
+right after being written; retry once before assuming the write failed. Echoed command
+text renders garbled in tool output — judge success by output and exit code, not by how
+the command line looks. Full details in `#[[file:../../AGENTS.md]]` under "Environment".
+
 ## Committing work
 
 Follow `#[[file:../../.agents/skills/git-commit/SKILL.md]]` for when and how to commit.

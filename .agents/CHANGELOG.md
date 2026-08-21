@@ -21,6 +21,29 @@ New entries go at the top (most recent first).
 
 ---
 
+## 2026-08-21 — Documented fish shell and environment quirks
+
+- Changed:
+  - `AGENTS.md` (edited — added an "Environment (read before running shell commands)"
+    section)
+  - `.kiro/steering/research-agent.md` (edited — added a compact "Shell and environment"
+    section so the warning is auto-loaded every session)
+  - `.agents/CHANGELOG.md` (this entry)
+- Why: The user pointed out the shell is fish, not bash. This had already caused real
+  failures in earlier sessions in this repo: a `declare -A` associative-array download
+  script failed outright and had to be re-run wrapped in `bash -c`, and multiple attempts
+  to redirect command output to `/tmp` and read it back failed silently because the
+  file-reading tools cannot access `/tmp`. Recording these so future sessions don't
+  rediscover them by trial and error.
+- Details: Documented that the shell is fish and listed the specific bash-isms that break
+  (`declare -A`, `VAR=value`, `export`, `$?`, heredocs, `done`) with fish equivalents, plus
+  the rule to wrap any loop/array/multi-step script in `bash -c '...'` rather than
+  hand-translating it. Also recorded three other verified quirks: the file tools cannot
+  read `/tmp` (use workspace-local scratch files and clean them up), a just-written file
+  may need one read retry, and echoed command text renders garbled so success should be
+  judged from output and exit code. Mirrored a short form into the always-on steering file
+  since `AGENTS.md` is only read when explicitly opened.
+
 ## 2026-08-20 — Added git-commit skill
 
 - Changed:

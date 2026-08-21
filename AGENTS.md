@@ -96,6 +96,34 @@ drifted from reality is worse than no brief at all, because it gives false confi
   work sit uncommitted, and don't commit broken/half-finished state either. See that
   skill for exactly when and how.
 
+## Environment (read before running shell commands)
+
+**The shell is fish, not bash.** This has bitten real sessions in this repo, so treat it as
+a hard constraint rather than a footnote:
+
+- **No bash-only syntax.** `declare -A` (associative arrays), `VAR=value` assignment,
+  `export VAR=x`, `$?`, `${arr[@]}`, and bash heredocs all fail or behave differently in
+  fish. Fish equivalents: `set VAR value`, `set -x VAR x`, `$status` instead of `$?`,
+  `for x in ...; ...; end` instead of `done`.
+- **For anything beyond a simple one-liner, wrap it explicitly:** `bash -c '<script>'`.
+  This is the reliable escape hatch for loops, arrays, and multi-step scripts — use it
+  rather than trying to hand-translate a script into fish.
+- Simple chaining with `&&`, `||`, and `;` does work in fish 3.x, so short sequential
+  commands are fine unwrapped.
+
+**Other verified environment quirks in this workspace:**
+
+- **The file-reading tools cannot read `/tmp`.** Redirecting command output to `/tmp/...`
+  and then reading it back does not work here. Write scratch output inside the workspace
+  instead (e.g. `./state.tmp`), read it, then delete it — and don't leave scratch files
+  behind or commit them.
+- **A freshly written file may not be readable on the very first attempt.** If a read
+  immediately after a write reports the path as missing, retry once before concluding the
+  write failed.
+- **Terminal echo of commands renders garbled** in this setup (the command line is
+  visually mangled in tool output). Judge success by the actual command output and exit
+  code, not by the echoed command text looking wrong.
+
 ## Project conventions
 
 - No build/test tooling exists yet in this repo (it currently holds research documents,

@@ -343,3 +343,50 @@ introduction were still readable and were reviewed via the publisher's HTML arti
 and that is reflected honestly above rather than presenting these as full downloads. If a
 local copy of these three papers is needed, they should be downloaded manually through a
 browser from the links given in sections 1.3, 5.2, and 5.3.
+
+---
+
+## 10. Oriented Object Detection (OOD) in Aerial and Remote Sensing Imagery
+
+### 10.1 DOTA: A Large-scale Dataset for Object Detection in Aerial Images
+- Link: https://arxiv.org/abs/1711.10398 (PDF: https://openaccess.thecvf.com/content_cvpr_2018/papers/Xia_DOTA_A_Large-Scale_CVPR_2018_paper.pdf)
+- Downloaded as: `papers/DOTA_Xia2018_CVPR.pdf` (1.3 MB, verified genuine PDF, 10 pages)
+- Authors: Gui-Song Xia, Xiang Bai, Jian Ding, Zhen Zhu, Serge Belongie, Jiebo Luo, Mihai Datcu, Marcello Pelillo, Liangpei Zhang, CVPR 2018.
+- Contents: Introduces DOTA, a benchmark dataset specifically designed for object detection in aerial scenes with arbitrary orientations. Contains 2,806 large aerial images (approx. 4000x4000 pixels) annotated with 188,282 instances across 15 common categories using 8-dof oriented bounding boxes (quadrilaterals). Provides baseline evaluations of horizontal vs. oriented detectors.
+- Takeaway: Foundational dataset and evaluation protocol that established oriented bounding box (OBB) benchmark standards across earth vision and remote sensing.
+
+### 10.2 Learning RoI Transformer for Oriented Object Detection in Aerial Images
+- Link: https://arxiv.org/abs/1812.00155 (PDF: https://openaccess.thecvf.com/content_CVPR_2019/papers/Ding_Learning_RoI_Transformer_for_Oriented_Object_Detection_in_Aerial_Images_CVPR_2019_paper.pdf)
+- Downloaded as: `papers/RoITransformer_Ding2019_CVPR.pdf` (1.35 MB, verified genuine PDF, 10 pages)
+- Authors: Jian Ding, Nan Xue, Yang Long, Gui-Song Xia, Qikai Lu, CVPR 2019.
+- Contents: Proposes RoI Transformer to address mismatch and misalignment between standard horizontal region proposals (HRoIs) and oriented objects. Uses a Rotated RoI (RRoI) learner to transform HRoIs into rotated RoIs and a Rotated Position Sensitive RoI Align (RPS-RoI-Align) module to extract rotation-invariant features without anchor proliferation.
+- Takeaway: Landmark architectural contribution demonstrating that learning geometric transformations of region proposals resolves spatial misalignment in two-stage oriented detectors with minimal computation overhead.
+
+### 10.3 Mask OBB: A Semantic Attention-Based Mask Oriented Bounding Box Representation for Multi-Category Object Detection in Aerial Images
+- Link: https://doi.org/10.3390/rs11242930 (Archive Mirror: http://web.archive.org/web/20220618194628/https://mdpi-res.com/d_attachment/remotesensing/remotesensing-11-02930/article_deploy/remotesensing-11-02930-v2.pdf?version=1576747117)
+- Downloaded as: `papers/MaskOBB_Wang2019_RemoteSensing.pdf` (35.5 MB, verified genuine PDF, 10 pages)
+- Authors: Jinwang Wang, Jian Ding, Haowen Guo, Wensheng Cheng, Ting Pan, Wen Yang, Remote Sensing 2019.
+- Contents: Formulates oriented object detection as an instance segmentation / pixel-level mask classification task to eliminate the parameter definition ambiguities (angle boundary discontinuities, vertex ordering) inherent in standard regression-based OBB approaches. Employs an Inception Lateral Connection Network (ILCN) for scale variations and a Semantic Attention Network (SAN) to separate objects from cluttered aerial backgrounds.
+- Takeaway: Demonstrates that segmentation-guided representation resolves angle periodicity and boundary discontinuities in dense multi-category aerial object detection.
+
+### 10.4 Oriented Object Detection in Aerial Images with Box Boundary-Aware Vectors
+- Link: https://arxiv.org/abs/2008.07043 (PDF: https://arxiv.org/pdf/2008.07043.pdf)
+- Downloaded as: `papers/BBAVectors_Yi2021_arxiv2008.07043.pdf` (6.74 MB, verified genuine PDF, 6 pages)
+- Authors: Jingru Yi, Pengxiang Wu, Bo Liu, Qiaoying Huang, Hui Qu, Dimitris Metaxas, WACV 2021.
+- Contents: Introduces BBAVectors, an anchor-free keypoint-based oriented object detector. Detects object center points and regresses box boundary-aware vectors across the four quadrants of the Cartesian coordinate plane to reconstruct oriented bounding boxes, eliminating positive/negative anchor imbalances and avoiding direct angle/aspect-ratio regression ambiguities.
+- Takeaway: Key one-stage anchor-free approach that proves vector regression from central keypoints is superior to direct $(x, y, w, h, \theta)$ coordinate regression.
+
+### 10.5 Oriented Object Detection in Optical Remote Sensing Images using Deep Learning: A Survey
+- Link: https://arxiv.org/abs/2302.10473 (Journal DOI: https://doi.org/10.1007/s10462-025-11256-0)
+- Downloaded as: `papers/OOD_Survey_Wang2023_arxiv2302.10473.pdf` (8.35 MB, verified genuine PDF, 46 pages)
+- Authors: Kun Wang, Zi Wang, Zhang Li, Ang Su, Xichao Teng, Erting Pan, Minhao Liu, Qifeng Yu, Artificial Intelligence Review 2025 / arXiv:2302.10473v6.
+- Contents: Comprehensive 46-page survey tracing the technical evolution from horizontal bounding box (HBB) detection to oriented bounding box (OBB) detection in remote sensing. Categorizes methods across detection frameworks (two-stage, one-stage, anchor-free, DETR/transformer-based), OBB regression schemes, loss functions, and rotation-invariant feature representations, addressing feature misalignment and angle periodicity.
+- Takeaway: Definitive and exhaustive modern reference synthesizing architectures, datasets, loss functions, and benchmarks in remote sensing oriented object detection.
+
+### 10.6 A Comprehensive Survey of Oriented Object Detection in Remote Sensing Images
+- Link: https://doi.org/10.1016/j.eswa.2023.119960 (ScienceDirect: https://www.sciencedirect.com/science/article/pii/S0957417423004621)
+- Download status: NOT downloaded as a file (Publisher paywall). Published under Elsevier (*Expert Systems with Applications*, Vol. 224, Aug 2023, 119960) under subscription access; `is_oa: false`. No open-access preprint exists on arXiv, Research Square, TechRxiv, SSRN, or open university repositories.
+- Authors: Long Wen, Yu Cheng, Yi Fang, Xinyu Li.
+- Contents: Comprehensive review of deep learning oriented object detection in remote sensing images. Reviews the transition from horizontal to oriented detection, compares anchor-based and anchor-free frameworks, analyzes rotation-sensitive losses, and evaluates performance across public benchmarks.
+- Takeaway: Important journal survey covering rotation-invariant modeling and loss formulation. Available via institutional subscription at the DOI link above.
+

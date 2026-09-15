@@ -390,3 +390,13 @@ browser from the links given in sections 1.3, 5.2, and 5.3.
 - Contents: Comprehensive review of deep learning oriented object detection in remote sensing images. Reviews the transition from horizontal to oriented detection, compares anchor-based and anchor-free frameworks, analyzes rotation-sensitive losses, and evaluates performance across public benchmarks.
 - Takeaway: Important journal survey covering rotation-invariant modeling and loss formulation. Available via institutional subscription at the DOI link above.
 
+### 10.7 Rethinking Rotated Object Detection with Gaussian Wasserstein Distance Loss
+- Link (PMLR): https://proceedings.mlr.press/v139/yang21l.html (PDF: http://proceedings.mlr.press/v139/yang21l/yang21l.pdf, Supplementary: http://proceedings.mlr.press/v139/yang21l/yang21l-supp.pdf)
+- Link (arXiv): https://arxiv.org/abs/2101.11952
+- Downloaded as: `papers/GWD_Yang2021_ICML.pdf` (3.2 MB, verified genuine PDF v1.5, 10 pages) and `papers/GWD_Yang2021_ICML_supp.pdf` (409 KB, verified genuine PDF, 10 pages)
+- Authors: Xue Yang, Junchi Yan, Qi Ming, Wentao Wang, Xiaopeng Zhang, Qi Tian (Shanghai Jiao Tong University / Huawei Inc. / Beijing Institute of Technology), ICML 2021 (PMLR 139:11830-11841).
+- Contents: Proposes Gaussian Wasserstein Distance (GWD) loss for rotated object regression in aerial and scene text images. Maps 5-parameter oriented bounding boxes $(x, y, w, h, \theta)$ to 2D Gaussian distributions $\mathcal{N}(\mu, \Sigma)$ and computes the 2-Wasserstein distance, transformed via a bounded affinity function $L_{gwd} = 1 - \frac{1}{\tau + \sqrt{d^2}}$. Proves mathematically that the Gaussian covariance matrix naturally satisfies periodicity of angle (PoA) and exchangeability of edges (EoE) invariances, resolving boundary discontinuity, metric-loss inconsistency, and the square-like problem in a box-definition agnostic framework. Evaluated across DOTA-v1.0, UCAS-AOD, HRSC2016, ICDAR2015, and ICDAR2017-MLT using RetinaNet-R and $\text{R}^3\text{Det}$.
+- Takeaway: Landmark loss formulation that establishes the 2D Gaussian distribution modeling paradigm in oriented object detection. Provides differentiable IoU surrogate gradients even for non-overlapping tiny objects and yields massive gains in strict localization ($\text{AP}_{75}$) with zero inference latency overhead.
+- Survey Entry: See full 36-section literature survey analysis in `literature survey/GWD_Yang2021_ICML_survey.md`.
+
+

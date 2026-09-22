@@ -12,3 +12,6 @@ Thumbs.db
 *.pem
 *.key
 credentials.json
+
+# Large data
+data/

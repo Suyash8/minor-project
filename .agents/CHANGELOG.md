@@ -21,6 +21,16 @@ New entries go at the top (most recent first).
 
 ---
 
+## 2026-09-23 — Added scratch script cleanup rule and shadowed scratch folder
+
+- Changed:
+  - `AGENTS.md` (edited — added rule under "General agent behavior" requiring single-use scripts to be placed in `scratch/` or deleted immediately)
+  - `.kiro/steering/research-agent.md` (edited — added scratch script cleanup reminder under "Shell and environment")
+  - `.gitignore` (edited — added `scratch/`, `*.tmp`, `*.tmp.*`, `*.log`, and cache patterns)
+  - `.agents/CHANGELOG.md` (this entry)
+- Why: User instructed that single-use verification, benchmark-checking, or scratch scripts must never be left in root or committed to git to ensure the repository commit history remains clean.
+- Details: Added explicit instruction to AGENTS.md and steering file stating that all single-use scripts must be either immediately deleted upon completion or contained within the `scratch/` folder, which is shadowed by `.gitignore`. Created the `scratch/` directory and updated `.gitignore` accordingly.
+
 ## 2026-08-21 — Documented fish shell and environment quirks
 
 - Changed:

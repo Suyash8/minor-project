@@ -95,6 +95,12 @@ drifted from reality is worse than no brief at all, because it gives false confi
   whenever a task or sub-task completes and is verified — don't let a whole session's
   work sit uncommitted, and don't commit broken/half-finished state either. See that
   skill for exactly when and how.
+- **Never leave single-use or verification scripts in the workspace or commit history.**
+  When writing diagnostic, exploratory, benchmark-checking, or single-use verification
+  scripts, always delete them immediately after execution, or place them inside
+  `scratch/` (which is shadowed by `.gitignore`). Never commit ad-hoc or throwaway
+  scripts to git so that commit history remains completely clean.
+
 
 ## Environment (read before running shell commands)
 

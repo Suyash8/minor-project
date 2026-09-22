@@ -197,12 +197,13 @@ class CustomOBBDetector(BaseOBBDetector):
                     y_indices, x_indices = torch.where(mask)
                     scores = score_map[y_indices, x_indices].cpu().numpy()
 
-                    # Limit candidates to top 50
-                    if len(scores) > 50:
-                        top_inds = np.argsort(-scores)[:50]
+                    # Limit candidates to top 20
+                    if len(scores) > 20:
+                        top_inds = np.argpartition(-scores, 20)[:20]
                         y_indices = y_indices[top_inds]
                         x_indices = x_indices[top_inds]
                         scores = scores[top_inds]
+
 
                     boxes = []
                     for y_idx, x_idx, sc in zip(y_indices, x_indices, scores):

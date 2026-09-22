@@ -31,7 +31,9 @@ The shell here is **fish, not bash**. Do not use `declare -A`, `VAR=value`, `exp
 `bash -c '<script>'` rather than hand-translating it. Simple `&&`/`||`/`;` chains are fine.
 
 Also: the file-reading tools **cannot read `/tmp`** — write scratch output inside the
-workspace, read it, then delete it. A file may not be readable on the very first attempt
+workspace, read it, then delete it. Single-use and verification scripts must be created
+inside `scratch/` (shadowed by `.gitignore`) or deleted immediately after execution so
+commit history remains clean. A file may not be readable on the very first attempt
 right after being written; retry once before assuming the write failed. Echoed command
 text renders garbled in tool output — judge success by output and exit code, not by how
 the command line looks. Full details in `#[[file:../../AGENTS.md]]` under "Environment".

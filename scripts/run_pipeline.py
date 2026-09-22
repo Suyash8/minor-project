@@ -4,6 +4,12 @@ Master CLI Runner for Aerial OBB Detection, Evaluation & Comparative Analysis.
 Orchestrates dataset verification/download, multi-model evaluation, comprehensive metrics computation,
 confusion matrix extraction, continuous angle/box regression analysis, and report generation.
 
+Includes:
+- Crash-resilient atomic checkpointing and resumption (--resume)
+- Automated Google Drive integration for Google Colab runtimes
+- Proactive RAM and CUDA memory verification, throttling, and garbage collection
+- Graceful shutdown signal handling (SIGINT, SIGTERM)
+
 Usage:
   # Instant CPU smoke test on laptop:
   python scripts/run_pipeline.py --test --save-plots
@@ -17,11 +23,12 @@ Usage:
 
 import os
 import sys
+import time
 import argparse
 import datetime
 import json
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 import numpy as np
 import pandas as pd
 
@@ -37,8 +44,36 @@ from src.config import (
     SUPPORTED_DATASETS,
     SUPPORTED_MODELS,
     DATASET_CLASSES,
+    resolve_pipeline_paths,
 )
-from src.utils.env import get_device_info, set_seed, is_colab
+from src.utils.env import (
+    get_device_info,
+    set_seed,
+    is_colab,
+    is_drive_mounted,
+    get_drive_root,
+)
+from src.utils.system import (
+    get_available_ram_gb,
+    get_ram_usage_percent,
+    deep_cleanup_memory,
+    check_memory_pressure,
+    format_memory_summary,
+)
+from src.utils.security import (
+    safe_path_join,
+    setup_signal_handlers,
+)
+from src.utils.checkpoint import (
+    atomic_save_json,
+    is_evaluation_completed,
+    load_evaluation_checkpoint,
+    save_evaluation_checkpoint,
+    save_batch_progress,
+    clear_batch_progress,
+    save_run_manifest,
+    load_run_manifest,
+)
 from src.utils.visualizer import (
     plot_confusion_matrix,
     plot_angle_correlation,
@@ -57,8 +92,12 @@ from src.metrics import (
     compute_obb_iou_matrix,
 )
 
+
 def str2bool(v):
+    if isinstance(v, bool):
+        return v
     return str(v).lower() in ("yes", "true", "t", "1")
+
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -71,6 +110,12 @@ def parse_args():
         "--test", "-t",
         action="store_true",
         help="Run in fast testing mode on CPU using synthetic aerial scenes to verify the pipeline end-to-end.",
+    )
+    parser.add_argument(
+        "--resume",
+        type=str2bool,
+        default=True,
+        help="Resume execution if checkpoints exist from an earlier interrupted run.",
     )
     parser.add_argument(
         "--run-name",
@@ -164,6 +209,7 @@ def parse_args():
 
     return parser.parse_args()
 
+
 def run_single_evaluation(
     model,
     dataset: AerialOBBDataset,
@@ -171,11 +217,15 @@ def run_single_evaluation(
     conf_thresh: float,
     iou_thresh: float,
     batch_size: int,
+    results_dir: Path,
+    run_id: str,
+    model_name: str,
+    dataset_name: str,
+    is_test: bool = False,
 ) -> Dict[str, Any]:
     """
-    Execute full evaluation loop over a dataset for a single model.
-    Collects predictions, evaluates detection mAP, builds confusion matrix,
-    derives precision/recall/accuracy, and computes continuous regression metrics.
+    Execute full evaluation loop over a dataset for a single model with
+    RAM memory protection and atomic mid-batch checkpointing.
     """
     num_samples = len(dataset)
     class_names = dataset.class_names
@@ -187,16 +237,35 @@ def run_single_evaluation(
     matched_gt_boxes = []
     matched_pred_boxes = []
 
-    # Run inference in batches
-    for start_idx in range(0, num_samples, batch_size):
-        end_idx = min(start_idx + batch_size, num_samples)
-        batch_imgs = [dataset.get_image(i) for i in range(start_idx, end_idx)]
+    current_batch_size = max(1, batch_size)
+    total_batches = (num_samples + current_batch_size - 1) // current_batch_size
+    start_time = time.time()
+
+    print(f"    [*] Starting evaluation: {num_samples} samples | Initial batch size: {current_batch_size}")
+    print(f"    [*] Initial Memory: {format_memory_summary()}")
+
+    sample_idx = 0
+    batch_idx = 0
+
+    while sample_idx < num_samples:
+        # Check system memory pressure before each batch
+        mem_status = check_memory_pressure(critical_ram_gb=1.0, max_usage_pct=90.0, auto_clean=True)
+        if mem_status["should_throttle"] and current_batch_size > 1:
+            current_batch_size = max(1, current_batch_size // 2)
+            print(
+                f"    [RAM Guard] High memory pressure ({mem_status['available_gb']:.2f} GB free, "
+                f"{mem_status['usage_pct']:.1f}% used). Throttled batch size to {current_batch_size}.",
+                file=sys.stderr,
+            )
+
+        end_idx = min(sample_idx + current_batch_size, num_samples)
+        batch_imgs = [dataset.get_image(i) for i in range(sample_idx, end_idx)]
         batch_gt = [
             dataset.get_ground_truth(img_idx, img_width=batch_imgs[i].size[0], img_height=batch_imgs[i].size[1])
-            for i, img_idx in enumerate(range(start_idx, end_idx))
+            for i, img_idx in enumerate(range(sample_idx, end_idx))
         ]
 
-        # Get predictions
+        # Model inference
         batch_preds = model.predict(
             batch_imgs,
             conf_thresh=conf_thresh,
@@ -205,7 +274,7 @@ def run_single_evaluation(
             ground_truth_hints=batch_gt,
         )
 
-        for i, img_idx in enumerate(range(start_idx, end_idx)):
+        for i, img_idx in enumerate(range(sample_idx, end_idx)):
             img = batch_imgs[i]
             w_img, h_img = img.size
             gt_dict = dataset.get_ground_truth(img_idx, img_width=w_img, img_height=h_img)
@@ -226,6 +295,29 @@ def run_single_evaluation(
                             matched_gt_boxes.append(gt_boxes[best_g])
                             matched_pred_boxes.append(p_boxes[p_i])
 
+        sample_idx = end_idx
+        batch_idx += 1
+
+        # Periodically save batch progress
+        save_batch_progress(
+            results_dir=results_dir,
+            run_id=run_id,
+            dataset_name=dataset_name,
+            model_name=model_name,
+            batch_idx=batch_idx,
+            total_batches=total_batches,
+            samples_processed=sample_idx,
+            total_samples=num_samples,
+            elapsed_seconds=time.time() - start_time,
+        )
+
+        # Periodic cleanup if warning pressure exists
+        if mem_status["status"] in ("warning", "recovered"):
+            deep_cleanup_memory()
+
+    # Clear mid-batch progress once inference is fully complete
+    clear_batch_progress(results_dir, run_id, dataset_name, model_name)
+
     # 1. Detection mAP Metrics
     map_results = compute_map_metrics(all_gt, all_preds, class_names)
 
@@ -243,9 +335,15 @@ def run_single_evaluation(
     # 5. Latency & FPS Benchmark
     if num_samples > 0:
         sample_img = dataset.get_image(0)
-        perf_stats = model.benchmark_latency(sample_img, num_warmup=2, num_runs=10)
+        warmup = 1 if is_test else 2
+        runs = 2 if is_test else 5
+        perf_stats = model.benchmark_latency(sample_img, num_warmup=warmup, num_runs=runs)
     else:
         perf_stats = {"mean_latency_ms": 0.0, "p95_latency_ms": 0.0, "fps": 0.0}
+
+    # Final deep cleanup
+    deep_cleanup_memory()
+
 
     return {
         "map": map_results,
@@ -258,6 +356,7 @@ def run_single_evaluation(
         "matched_pred_boxes": matched_pred_arr,
     }
 
+
 def main():
     args = parse_args()
     set_seed(args.seed)
@@ -269,26 +368,39 @@ def main():
     dev_info = get_device_info(args.device)
     device = dev_info["device"]
     print(f"[*] Hardware Environment : {dev_info['device_name']} (PyTorch device: '{device}')")
-    if is_colab():
-        print("[*] Google Colab Environment Detected.")
+    print(f"[*] Memory State         : {format_memory_summary()}")
 
     if args.test:
-        print("[*] --test flag activated! Setting up fast CPU test mode with synthetic aerial data.")
+        print("[*] --test flag activated! Fast CPU test mode with synthetic aerial data.")
         args.batch_size = min(args.batch_size, 2)
         if args.max_samples is None:
             args.max_samples = 4
-
-    # Setup directories
-    data_dir = Path(args.data_dir)
-    weights_dir = Path(args.weights_dir)
-    results_dir = Path(args.results_dir)
 
     run_id = args.run_name or f"run_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
     if args.test:
         run_id += "_test"
 
-    output_dir = results_dir / run_id
-    output_dir.mkdir(parents=True, exist_ok=True)
+    # Setup directories via path resolver (incorporates Google Drive when in Colab)
+    paths = resolve_pipeline_paths(
+        data_dir=args.data_dir if args.data_dir != str(DEFAULT_DATA_DIR) else None,
+        weights_dir=args.weights_dir if args.weights_dir != str(DEFAULT_WEIGHTS_DIR) else None,
+        results_dir=args.results_dir if args.results_dir != str(DEFAULT_RESULTS_DIR) else None,
+        run_id=run_id,
+    )
+
+    data_dir = paths["data_dir"]
+    weights_dir = paths["weights_dir"]
+    results_dir = paths["results_dir"]
+    output_dir = paths["output_dir"]
+
+    if paths["in_colab"]:
+        print("[*] Google Colab Environment Detected.")
+        if paths["drive_mounted"]:
+            print(f"[*] Google Drive Mounted : {get_drive_root()}")
+            print("    Persistent storage is active: weights and results will persist in Google Drive.")
+        else:
+            print("[!] Note: Google Drive is not mounted. For permanent retention, mount drive at /content/drive.")
+
     plots_dir = output_dir / "plots"
     if args.save_plots:
         plots_dir.mkdir(parents=True, exist_ok=True)
@@ -317,7 +429,7 @@ def main():
                     datasets_ready[d_name] = success
                 else:
                     print(f"[!] Dataset '{d_name}' not found locally at {status['path']}.")
-                    print(f"    Pass --download to attempt automated retrieval, or follow manual instructions:\n")
+                    print("    Pass --download to attempt automated retrieval, or follow manual instructions:\n")
                     print(status["manual_guide"])
                     datasets_ready[d_name] = False
             else:
@@ -328,9 +440,33 @@ def main():
         print("[!] No datasets are ready for evaluation. Exiting.", file=sys.stderr)
         sys.exit(1)
 
-    # Step 2: Evaluation Loop
+    # Queue evaluation pairs
+    total_pairs = [{"dataset": d, "model": m} for d in valid_datasets for m in requested_models]
+    completed_pairs = []
+    pending_pairs = list(total_pairs)
     all_summary_rows = []
 
+    # Check for existing run manifest if resuming
+    if args.resume:
+        manifest = load_run_manifest(results_dir, run_id)
+        if manifest:
+            print(f"[*] Existing run manifest detected for '{run_id}'. Resuming previous progress...")
+
+    # Register graceful signal handler to commit run state on SIGINT/SIGTERM
+    def graceful_exit(signum, frame):
+        print(f"\n[!] Signal handler invoked. Flushing partial run manifest to {output_dir}...")
+        save_run_manifest(
+            results_dir=results_dir,
+            run_id=run_id,
+            summary_rows=all_summary_rows,
+            completed_pairs=completed_pairs,
+            pending_pairs=pending_pairs,
+            is_completed=False,
+        )
+
+    setup_signal_handlers(graceful_exit)
+
+    # Step 2: Evaluation Loop
     for d_name in valid_datasets:
         print(f"\n{'#' * 65}")
         print(f" Evaluating on Dataset: {d_name.upper()}")
@@ -345,7 +481,20 @@ def main():
         print(f"[*] Loaded {len(dataset)} validation images for {d_name}.")
 
         for m_name in requested_models:
+            current_pair = {"dataset": d_name, "model": m_name}
             print(f"\n--> Model: {m_name} on {d_name}")
+
+            # Check if this evaluation was already completed
+            if args.resume and is_evaluation_completed(results_dir, run_id, d_name, m_name):
+                print(f"    [CHECKPOINT HIT] Found completed evaluation for {m_name} on {d_name}. Skipping.")
+                cached_ckpt = load_evaluation_checkpoint(results_dir, run_id, d_name, m_name)
+                if cached_ckpt and "summary" in cached_ckpt:
+                    all_summary_rows.append(cached_ckpt["summary"])
+                    completed_pairs.append(current_pair)
+                    if current_pair in pending_pairs:
+                        pending_pairs.remove(current_pair)
+                    continue
+
             try:
                 model = get_model(m_name, device=device, num_classes=len(dataset.class_names))
                 model.load()
@@ -361,7 +510,13 @@ def main():
                 conf_thresh=args.conf_thresh,
                 iou_thresh=args.iou_thresh,
                 batch_size=args.batch_size,
+                results_dir=results_dir,
+                run_id=run_id,
+                model_name=m_name,
+                dataset_name=d_name,
+                is_test=args.test,
             )
+
 
             map_res = eval_out["map"]
             cls_res = eval_out["classification"]
@@ -394,8 +549,35 @@ def main():
                 "mean_latency_ms": perf_res["mean_latency_ms"],
             }
             all_summary_rows.append(summary_item)
+            completed_pairs.append(current_pair)
+            if current_pair in pending_pairs:
+                pending_pairs.remove(current_pair)
 
-            print(f"    [mAP50: {map_res['map50']:.3f} | mAP75: {map_res['map75']:.3f} | F1: {cls_res['macro_f1']:.3f} | Angle MAE: {reg_res['angle_mae']:.2f}° | Pearson r: {reg_res['angle_pearson_r']:.3f} | R²: {reg_res['angle_r2']:.3f} | FPS: {perf_res['fps']:.1f}]")
+            print(
+                f"    [mAP50: {map_res['map50']:.3f} | mAP75: {map_res['map75']:.3f} | F1: {cls_res['macro_f1']:.3f} | "
+                f"Angle MAE: {reg_res['angle_mae']:.2f}° | Pearson r: {reg_res['angle_pearson_r']:.3f} | "
+                f"R²: {reg_res['angle_r2']:.3f} | FPS: {perf_res['fps']:.1f}]"
+            )
+
+            # Persist checkpoint immediately after model-dataset completion
+            save_evaluation_checkpoint(
+                results_dir=results_dir,
+                run_id=run_id,
+                dataset_name=d_name,
+                model_name=m_name,
+                summary_item=summary_item,
+                completed=True,
+            )
+
+            # Update master manifest
+            save_run_manifest(
+                results_dir=results_dir,
+                run_id=run_id,
+                summary_rows=all_summary_rows,
+                completed_pairs=completed_pairs,
+                pending_pairs=pending_pairs,
+                is_completed=len(pending_pairs) == 0,
+            )
 
             # Save visual plots
             if args.save_plots:
@@ -419,16 +601,21 @@ def main():
                         mae=reg_res["angle_mae"],
                     )
 
+            # Clean memory before loading next model
+            deep_cleanup_memory()
+
     if not all_summary_rows:
         print("[!] No evaluations completed.", file=sys.stderr)
         sys.exit(1)
 
-    # Save summary table CSV and JSON
+    # Save summary table CSV and JSON atomically
     df_summary = pd.DataFrame(all_summary_rows)
-    df_summary.to_csv(output_dir / "benchmark_summary.csv", index=False)
+    csv_path = output_dir / "benchmark_summary.csv"
+    tmp_csv = csv_path.with_name(f"{csv_path.name}.tmp")
+    df_summary.to_csv(tmp_csv, index=False)
+    os.replace(tmp_csv, csv_path)
 
-    with open(output_dir / "benchmark_metrics.json", "w") as f:
-        json.dump(all_summary_rows, f, indent=2)
+    atomic_save_json(all_summary_rows, output_dir / "benchmark_metrics.json")
 
     # Identify best model and dataset
     best_row_map50 = df_summary.loc[df_summary["map50"].idxmax()]
@@ -440,10 +627,25 @@ def main():
         comparison_chart_path = plots_dir / "model_benchmark_comparison.png"
         plot_benchmark_comparison(all_summary_rows, comparison_chart_path)
 
-    # Generate Markdown Report
+    # Generate Markdown Report atomically
     md_report = generate_markdown_report(all_summary_rows, best_model=best_model, best_dataset=best_dataset)
-    with open(output_dir / "benchmark_report.md", "w") as f:
+    report_path = output_dir / "benchmark_report.md"
+    tmp_report = report_path.with_name(f"{report_path.name}.tmp")
+    with open(tmp_report, "w", encoding="utf-8") as f:
         f.write(md_report)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp_report, report_path)
+
+    # Update manifest to completed state
+    save_run_manifest(
+        results_dir=results_dir,
+        run_id=run_id,
+        summary_rows=all_summary_rows,
+        completed_pairs=completed_pairs,
+        pending_pairs=[],
+        is_completed=True,
+    )
 
     # Print Final Summary Table to Terminal
     print("\n" + "=" * 80)
@@ -451,12 +653,14 @@ def main():
     print("=" * 80)
     print(format_metrics_table(all_summary_rows))
     print("=" * 80)
-    print(f"\n[✓] Results and plots successfully saved to: {output_dir}")
-    print(f"    - CSV Summary      : {output_dir / 'benchmark_summary.csv'}")
+    print(f"\n[✓] Results, checkpoints, and plots successfully saved to: {output_dir}")
+    print(f"    - CSV Summary      : {csv_path}")
     print(f"    - JSON Metrics     : {output_dir / 'benchmark_metrics.json'}")
-    print(f"    - Markdown Report  : {output_dir / 'benchmark_report.md'}")
+    print(f"    - Markdown Report  : {report_path}")
+    print(f"    - Master Manifest  : {output_dir / 'run_manifest.json'}")
     if args.save_plots:
         print(f"    - Visual Plots Dir : {plots_dir}")
+
 
 if __name__ == "__main__":
     main()

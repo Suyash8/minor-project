@@ -26,8 +26,11 @@ def plot_confusion_matrix(
 
     if normalize:
         row_sums = cm.sum(axis=1, keepdims=True)
-        row_sums[row_sums == 0] = 1e-6
-        plot_data = cm.astype(float) / row_sums
+        plot_data = np.divide(
+            cm.astype(float), row_sums,
+            out=np.zeros_like(cm, dtype=float),
+            where=(row_sums > 0)
+        )
         fmt = ".2f"
     else:
         plot_data = cm

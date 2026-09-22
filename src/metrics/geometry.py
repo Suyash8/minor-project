@@ -7,6 +7,12 @@ import math
 from typing import List, Tuple, Optional
 import numpy as np
 
+try:
+    from shapely.geometry import Polygon
+except ImportError:
+    Polygon = None
+
+
 def obb_to_corners(cx: float, cy: float, w: float, h: float, angle_deg: float) -> np.ndarray:
     """
     Convert an oriented box (center_x, center_y, width, height, angle_degrees)
@@ -60,38 +66,46 @@ def polygon_to_obb_params(pts: np.ndarray) -> Tuple[float, float, float, float, 
 def polygon_iou(corners1: np.ndarray, corners2: np.ndarray) -> float:
     """
     Compute intersection-over-union between two 4-point convex polygons.
-    Uses Shapely if available, with a fast axis-aligned bounding box fallback.
+    Uses fast AABB disjoint check, Shapely polygon intersection, and arithmetic union area.
     """
-    try:
-        from shapely.geometry import Polygon
-        poly1 = Polygon(corners1)
-        poly2 = Polygon(corners2)
+    min_x1, min_y1 = corners1[:, 0].min(), corners1[:, 1].min()
+    max_x1, max_y1 = corners1[:, 0].max(), corners1[:, 1].max()
+    min_x2, min_y2 = corners2[:, 0].min(), corners2[:, 1].min()
+    max_x2, max_y2 = corners2[:, 0].max(), corners2[:, 1].max()
 
-        if not poly1.is_valid:
-            poly1 = poly1.buffer(0)
-        if not poly2.is_valid:
-            poly2 = poly2.buffer(0)
+    # Fast axis-aligned bounding box disjoint check
+    if max_x1 < min_x2 or min_x1 > max_x2 or max_y1 < min_y2 or min_y1 > max_y2:
+        return 0.0
 
-        inter = poly1.intersection(poly2).area
-        union = poly1.union(poly2).area
+    if Polygon is not None:
+        try:
+            poly1 = Polygon(corners1)
+            poly2 = Polygon(corners2)
 
-        return float(inter / union) if union > 0 else 0.0
-    except Exception:
-        # Fallback to axis-aligned bounding box enclosing the corners
-        min_x1, min_y1 = corners1[:, 0].min(), corners1[:, 1].min()
-        max_x1, max_y1 = corners1[:, 0].max(), corners1[:, 1].max()
-        min_x2, min_y2 = corners2[:, 0].min(), corners2[:, 1].min()
-        max_x2, max_y2 = corners2[:, 0].max(), corners2[:, 1].max()
+            if not poly1.is_valid:
+                poly1 = poly1.buffer(0)
+            if not poly2.is_valid:
+                poly2 = poly2.buffer(0)
 
-        inter_x = max(0.0, min(max_x1, max_x2) - max(min_x1, min_x2))
-        inter_y = max(0.0, min(max_y1, max_y2) - max(min_y1, min_y2))
-        inter_area = inter_x * inter_y
+            inter = poly1.intersection(poly2).area
+            if inter <= 0.0:
+                return 0.0
+            union = poly1.area + poly2.area - inter
+            return float(inter / union) if union > 0 else 0.0
+        except Exception:
+            pass
 
-        area1 = (max_x1 - min_x1) * (max_y1 - min_y1)
-        area2 = (max_x2 - min_x2) * (max_y2 - min_y2)
-        union_area = area1 + area2 - inter_area
+    # Fallback to axis-aligned bounding box enclosing the corners
+    inter_x = max(0.0, min(max_x1, max_x2) - max(min_x1, min_x2))
+    inter_y = max(0.0, min(max_y1, max_y2) - max(min_y1, min_y2))
+    inter_area = inter_x * inter_y
 
-        return float(inter_area / union_area) if union_area > 0 else 0.0
+    area1 = (max_x1 - min_x1) * (max_y1 - min_y1)
+    area2 = (max_x2 - min_x2) * (max_y2 - min_y2)
+    union_area = area1 + area2 - inter_area
+
+    return float(inter_area / union_area) if union_area > 0 else 0.0
+
 
 def compute_obb_iou_matrix(gt_boxes: np.ndarray, pred_boxes: np.ndarray) -> np.ndarray:
     """

@@ -7,9 +7,21 @@ import random
 import sys
 from typing import Dict, Any
 
+from pathlib import Path
+
 def is_colab() -> bool:
     """Check if code is executing inside a Google Colab notebook environment."""
     return "google.colab" in sys.modules or os.path.exists("/content")
+
+def is_drive_mounted() -> bool:
+    """Check if Google Drive is mounted at /content/drive/MyDrive."""
+    drive_base = Path("/content/drive/MyDrive")
+    return is_colab() and drive_base.exists()
+
+def get_drive_root() -> Path:
+    """Return the designated Google Drive project root for object-detection."""
+    return Path("/content/drive/MyDrive/object-detection")
+
 
 def get_device_info(requested_device: str = "auto") -> Dict[str, Any]:
     """
@@ -63,5 +75,9 @@ def set_seed(seed: int = 42) -> None:
             torch.cuda.manual_seed_all(seed)
             torch.backends.cudnn.deterministic = True
             torch.backends.cudnn.benchmark = False
+        else:
+            # Prevent excessive thread contention on CPU
+            torch.set_num_threads(min(4, os.cpu_count() or 1))
     except ImportError:
         pass
+

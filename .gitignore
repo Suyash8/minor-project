@@ -13,5 +13,22 @@ Thumbs.db
 *.key
 credentials.json
 
-# Large data
+# Large data & weights
 data/
+weights/
+*.pt
+*.pth
+
+# Temporary & single-use scratch files
+scratch/
+*.tmp
+*.tmp.*
+*.log
+
+# Python / Environment
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+.pytest_cache/

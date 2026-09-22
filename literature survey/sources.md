@@ -399,4 +399,45 @@ browser from the links given in sections 1.3, 5.2, and 5.3.
 - Takeaway: Landmark loss formulation that establishes the 2D Gaussian distribution modeling paradigm in oriented object detection. Provides differentiable IoU surrogate gradients even for non-overlapping tiny objects and yields massive gains in strict localization ($\text{AP}_{75}$) with zero inference latency overhead.
 - Survey Entry: See full 36-section literature survey analysis in `literature survey/GWD_Yang2021_ICML_survey.md`.
 
+### 10.8 Learning High-Precision Bounding Box for Rotated Object Detection via Kullback-Leibler Divergence
+- Link (NeurIPS): https://proceedings.neurips.cc/paper/2021/hash/b4a528955b84f584974e92d025a75d19-Abstract.html (PDF: https://proceedings.neurips.cc/paper/2021/file/b4a528955b84f584974e92d025a75d19-Paper.pdf)
+- Link (arXiv): https://arxiv.org/abs/2106.01883
+- Downloaded as: `papers/KLD_Yang2021_NeurIPS.pdf` (9.0 MB, verified genuine PDF v1.5, 14 pages)
+- Authors: Xue Yang, Xiaojiang Yang, Jirui Yang, Qi Ming, Wentao Wang, Qi Tian, Junchi Yan (Shanghai Jiao Tong University / UCAS / BIT / Huawei Inc.), NeurIPS 2021 (Advances in Neural Information Processing Systems 34).
+- Contents: Proposes Kullback-Leibler Divergence (KLD) loss for rotated object regression in aerial and scene text images. Replaces inductive loss design with a deductive framework where rotated boxes are modeled as 2D Gaussians and horizontal detection is a special degenerated case. Derives analytical gradients showing that KLD creates a complete chain coupling across position, scale, and angle, with angular gradients dynamically scaling with object aspect ratio ($\propto w_t^2/h_t^2 + h_t^2/w_t^2 - 2$). Proves strict affine and scale invariance under $M = kI$, fixing GWD's center-point decoupling and scale-dependency flaws. Evaluated on 7 datasets (DOTA-v1.0/1.5/2.0, UCAS-AOD, HRSC2016, ICDAR2015, MSRA-TD500, MLT) plus MS COCO.
+- Takeaway: Strictly superior successor to GWD for oriented aerial object detection. Proves that dynamic parameter gradient self-modulation and scale invariance are foundational for high-precision bounding box localization ($\text{AP}_{75}$), achieving SOTA 80.63% mAP50 on DOTA-v1.0 and a massive +33.96 pp gain in $\text{AP}_{75}$ on HRSC2016 with zero inference latency overhead.
+- Survey Entry: See full 36-section literature survey analysis in `literature survey/KLD_Yang2021_NeurIPS_survey.md`.
+
+### 10.9 Drone-based RGB-Infrared Cross-Modality Vehicle Detection via Uncertainty-Aware Learning (DroneVehicle)
+- Link (IEEE): https://doi.org/10.1109/TCSVT.2022.3168279
+- Link (arXiv): https://arxiv.org/abs/2003.02437
+- Downloaded as: `papers/DroneVehicle_Sun2022_TCSVT.pdf` (3.2 MB, verified genuine PDF v1.5, 14 pages)
+- Authors: Yiming Sun, Bing Cao, Pengfei Zhu, Qinghua Hu (College of Intelligence and Computing, Tianjin University, China), IEEE Transactions on Circuits and Systems for Video Technology (TCSVT), 32(10):6700-6713, Oct. 2022.
+- Contents: Introduces the DroneVehicle dataset, the first and largest full-time drone RGB-Infrared benchmark comprising 28,439 image pairs (56,878 images) and 953,087 oriented bounding boxes across 5 vehicle classes from day to dark night, varying across heights (80m-120m) and pitch angles (15°-45°, 90°). Proposes the UA-CMDet framework featuring an Uncertainty-Aware Module (UAM) that dynamically modulates bounding box regression weights based on cross-modal polygon IoU ($CM_{IoU}$), label missingness, and global illumination ($\omega_{iv}$). Further designs Illumination-Aware NMS (IA-NMS) to discount dark RGB false positives during test-time cross-modal box merging.
+- Takeaway: Landmark multimodal benchmark and methodology for 24/7 round-the-clock drone computer vision. Proves that multimodal RGB-TIR fusion is essential to overcome nighttime optical blindness and daytime thermal crossover artifacts, achieving 64.01% mAP (+16.10 pp over single-modality RGB) with zero test-time overhead from the uncertainty estimator.
+- Survey Entry: See full 36-section literature survey analysis in `literature survey/DroneVehicle_Sun2022_TCSVT_survey.md`.
+
+### 10.10 More Clear, More Flexible, More Precise: A Comprehensive Oriented Object Detection Benchmark for UAV (CODrone)
+- Link (arXiv): https://arxiv.org/abs/2504.20032 (PDF: https://arxiv.org/pdf/2504.20032.pdf)
+- Link (GitHub): https://github.com/AHideoKuzeA/CODrone-A-Comprehensive-Oriented-Object-Detection-benchmark-for-UAV
+- Downloaded as: `papers/CODrone_2025.pdf` (5.1 MB, verified genuine PDF v1.5, 15 pages)
+- Authors: Kai Ye, Haidi Tang, Bowen Liu, Pingyang Dai, Liujuan Cao, Rongrong Ji (MAC Laboratory, School of Informatics, Xiamen University; Peng Cheng Laboratory, Shenzhen, China), arXiv preprint arXiv:2504.20032, April 2025.
+- Contents: Introduces CODrone, the first comprehensive 4K ultra-high-definition ($3840 \times 2160$) oriented object detection benchmark for UAVs. Comprises 10,004 high-resolution aerial images and 596,732 manually annotated oriented bounding boxes (OBB) across 12 diverse object categories collected via a DJI Mavic 3 Pro across multiple cities, seasons, and lighting conditions (61.2% daytime, 38.8% nighttime). Uniquely features a systematic $2 \times 3$ factorial matrix of camera tilt angles ($30^\circ$ oblique, $90^\circ$ nadir) and flight altitudes ($30\text{ m}, 60\text{ m}, 100\text{ m}$). Establishes a standardized benchmark evaluating 22 representative and SOTA oriented object detectors (two-stage, one-stage, anchor-free, rotation-equivariant, metric-loss, large-kernel, weakly supervised, and transformer architectures).
+- Takeaway: Foundational high-resolution UAV benchmark exposing that existing OOD algorithms suffer severe localization degradation ($AP_{75}$ collapses below 22% across all 22 baselines) under oblique viewing angles ($30^\circ$) and higher altitudes ($100\text{ m}$). Demonstrates the superiority of large selective receptive fields (LSKNet, 46.92% $AP_{50}$) and rotation-equivariant representations (ReDet, 44.73% $AP_{50}$, 20.17% $AP_{75}$) in real-world drone perception.
+- Survey Entry: See full 36-section literature survey analysis in `literature survey/CODrone_2025_survey.md`.
+
+### 10.11 UAV-OBB: An Aerial Urban Vehicle Dataset with Oriented Bounding Boxes for Remote Sensing Object Detection in Smart Cities
+- Link (Elsevier / ScienceDirect): https://doi.org/10.1016/j.dib.2026.112710
+- Link (PMC): https://www.ncbi.nlm.nih.gov/pmc/articles/PMC13092195/
+- Link (Mendeley Data): https://doi.org/10.17632/6snrjwcpkh.4
+- Downloaded as: `papers/UAV_OBB_Ahmad2026_DIB.pdf` (52 KB, compiled from full-text XML, 7 pages)
+- Authors: Israr Ahmad, Shang Fengjun, Kiran Bibi, Muhammad Salman Pathan (Chongqing University of Posts and Telecommunications, China; Dublin City University, Ireland), *Data in Brief* (Elsevier), 66:112710, March 2026.
+- Contents: Presents UAV-OBB, an aerial urban vehicle dataset with oriented bounding boxes (OBBs) designed for smart city intelligent traffic monitoring and rotation-aware object detection from low-altitude drone perspectives. Contains 1,617 RGB images ($1920 \times 1080$) and two 4K/30fps aerial video clips captured via a DJI Mavic 3 at altitudes of 75–108 m across major traffic corridors in Chongqing and Wuhan, China. Provides 46,807 manually annotated OBB instances across six fine-grained vehicle classes in native normalized YOLOv8-OBB 4-corner format (`bike`, `bus`, `car`, `other_vehicle`, `taxi`, `truck`), explicitly separating public taxis from private cars and isolating micromobility two-wheelers. Establishes a fine-tuned small-target YOLOv8-OBB baseline achieving 78.6% $mAP_{50}$ and 61.8% $mAP_{50-95}$ across all classes, led by 92.9% $mAP_{50}$ on taxis.
+- Takeaway: Lean, edge-deployable, high-precision urban traffic benchmark specifically optimized for intelligent transportation systems (ITS). Standardizes on native YOLOv8-OBB format for direct embedded deployment without preprocessing, demonstrating that aerial separation of taxis from passenger cars is highly effective (92.9% $mAP_{50}$) while identifying vulnerable road users (`bike`, 60.8% $mAP_{50}$, 39.5% $mAP_{50-95}$) as the key remaining detection bottleneck.
+- Survey Entry: See full 36-section literature survey analysis in `literature survey/UAV_OBB_Ahmad2026_DIB_survey.md`.
+
+
+
+
+
 

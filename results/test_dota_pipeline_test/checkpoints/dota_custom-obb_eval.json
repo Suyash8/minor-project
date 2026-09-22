@@ -1,0 +1,32 @@
+{
+  "dataset": "dota",
+  "model": "custom-obb",
+  "completed": true,
+  "timestamp": "2026-09-23T03:12:30.030195",
+  "summary": {
+    "model": "custom-obb",
+    "dataset": "dota",
+    "map50": 0.8345962473397707,
+    "map75": 0.7225018354661864,
+    "map50_95": 0.7443563712484284,
+    "ap_small": 0.932918811918782,
+    "ap_medium": 0.7848575678147867,
+    "ap_large": 1.0,
+    "precision": 0.25516505988898625,
+    "recall": 0.171996700103779,
+    "f1": 0.20525342874180083,
+    "accuracy": 0.648910411622276,
+    "specificity": 0.9960792805908092,
+    "angle_mae": 4.526386737823486,
+    "angle_rmse": 5.661444187164307,
+    "pearson_r": 0.5340511202812195,
+    "spearman_rho": 0.43631423263675495,
+    "r2_score": -0.001028660717226737,
+    "center_offset_mae": 4.056485652923584,
+    "center_offset_rmse": 4.56630802154541,
+    "aspect_ratio_r2": 0.9789568440397715,
+    "fps": 16.22602805154658,
+    "mean_latency_ms": 61.62937699991744
+  },
+  "details": {}
+}

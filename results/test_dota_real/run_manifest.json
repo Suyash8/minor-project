@@ -1,0 +1,42 @@
+{
+  "run_id": "test_dota_real",
+  "is_completed": true,
+  "updated_at": "2026-09-23T03:13:15.100603",
+  "total_pairs": 1,
+  "completed_count": 1,
+  "pending_count": 0,
+  "completed_pairs": [
+    {
+      "dataset": "dota",
+      "model": "yolov8n-obb"
+    }
+  ],
+  "pending_pairs": [],
+  "summaries": [
+    {
+      "model": "yolov8n-obb",
+      "dataset": "dota",
+      "map50": 0.8864686468646714,
+      "map75": 0.8287852511443502,
+      "map50_95": 0.8105345337015671,
+      "ap_small": 0.9276542511393652,
+      "ap_medium": 0.8993171730965496,
+      "ap_large": 1.0,
+      "precision": 0.26666666666666666,
+      "recall": 0.22006556301987146,
+      "f1": 0.2410324360611717,
+      "accuracy": 0.8344988344988346,
+      "specificity": 0.9998445998445998,
+      "angle_mae": 2.48626708984375,
+      "angle_rmse": 3.009565591812134,
+      "pearson_r": 0.681363582611084,
+      "spearman_rho": 0.6056674587240919,
+      "r2_score": 0.35744179888113536,
+      "center_offset_mae": 2.3016555309295654,
+      "center_offset_rmse": 2.6144487857818604,
+      "aspect_ratio_r2": 0.9944357063837599,
+      "fps": 7708.76909404402,
+      "mean_latency_ms": 0.12972239637747407
+    }
+  ]
+}

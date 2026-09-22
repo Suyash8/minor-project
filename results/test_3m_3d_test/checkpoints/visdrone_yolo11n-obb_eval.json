@@ -1,0 +1,32 @@
+{
+  "dataset": "visdrone",
+  "model": "yolo11n-obb",
+  "completed": true,
+  "timestamp": "2026-09-23T03:18:16.606223",
+  "summary": {
+    "model": "yolo11n-obb",
+    "dataset": "visdrone",
+    "map50": 0.8892723503875846,
+    "map75": 0.6997213810126334,
+    "map50_95": 0.5863841751678425,
+    "ap_small": 0.859513050399546,
+    "ap_medium": 0.90413719943399,
+    "ap_large": 0.9752475247523502,
+    "precision": 0.8516755952380952,
+    "recall": 0.7930973505777537,
+    "f1": 0.8175833271567147,
+    "accuracy": 0.8461538461538461,
+    "specificity": 0.9966065891868594,
+    "angle_mae": 2.624722719192505,
+    "angle_rmse": 3.3012685775756836,
+    "pearson_r": 0.0,
+    "spearman_rho": 0.0,
+    "r2_score": 0.0,
+    "center_offset_mae": 2.135361671447754,
+    "center_offset_rmse": 2.4354190826416016,
+    "aspect_ratio_r2": 0.9948595442300388,
+    "fps": 8567.181763582506,
+    "mean_latency_ms": 0.11672449909383431
+  },
+  "details": {}
+}

@@ -90,16 +90,7 @@ def train_yolo_obb(
         print(f"[*] Initializing model with base weights: {init_weights}")
         model = YOLO(init_weights)
 
-    # 4. Configure Precision (BF16 for Ampere/Hopper like A100/L4, FP16 for Turing like T4)
-    use_bf16 = False
-    use_half = False
-    if dev != "cpu" and torch.cuda.is_available():
-        if hasattr(torch.cuda, "is_bf16_supported") and torch.cuda.is_bf16_supported():
-            use_bf16 = True
-        else:
-            use_half = True
-
-    # 5. Execute Native Ultralytics Training
+    # 4. Execute Native Ultralytics Training
     start_time = time.time()
     train_args = {
         "data": str(yaml_path),
@@ -114,8 +105,6 @@ def train_yolo_obb(
         "project": str(weights_dir),
         "name": run_name,
         "exist_ok": True,
-        "half": use_half,
-        "bfloat16": use_bf16,
         "verbose": True,
         "resume": can_resume,
     }

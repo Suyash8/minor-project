@@ -196,6 +196,14 @@ def train_custom_detector(
     train_raw = AerialOBBDataset(dataset_name=dataset_name, data_dir=data_dir, split="train")
     val_raw = AerialOBBDataset(dataset_name=dataset_name, data_dir=data_dir, split="val")
 
+    labeled_train = sum(1 for s in train_raw.samples if s["label_path"] is not None and s["label_path"].exists())
+    print(f"[*] Verified training set for '{dataset_name}': {len(train_raw)} images ({labeled_train} with valid label files).")
+    if labeled_train == 0:
+        raise RuntimeError(
+            f"Cannot train custom-obb on '{dataset_name}': 0 ground truth annotations were found. "
+            f"Please verify that annotations exist in the dataset directory."
+        )
+
     train_ds = PyTorchOBBDataset(train_raw, img_size=img_size)
     val_ds = PyTorchOBBDataset(val_raw, img_size=img_size)
 
@@ -248,11 +256,16 @@ def train_custom_detector(
     if resume and last_pt.exists():
         print(f"[*] Loading previous checkpoint from {last_pt}...")
         checkpoint = torch.load(last_pt, map_location=dev)
-        model.load_state_dict(checkpoint["model_state"])
-        optimizer.load_state_dict(checkpoint["optimizer_state"])
-        start_epoch = checkpoint.get("epoch", 0) + 1
-        best_loss = checkpoint.get("best_loss", float("inf"))
-        print(f"[✓] Resumed at epoch {start_epoch}")
+        prev_best = checkpoint.get("best_loss", float("inf"))
+        prev_val = checkpoint.get("val_loss", float("inf"))
+        if prev_best <= 1e-5 or prev_val <= 1e-5:
+            print(f"[!] Warning: Checkpoint at {last_pt} recorded near-zero loss ({prev_best:.4f}). Ignoring corrupted checkpoint and starting fresh.")
+        else:
+            model.load_state_dict(checkpoint["model_state"])
+            optimizer.load_state_dict(checkpoint["optimizer_state"])
+            start_epoch = checkpoint.get("epoch", 0) + 1
+            best_loss = prev_best
+            print(f"[✓] Resumed at epoch {start_epoch}")
 
     # 5. Training Loop
     total_start = time.time()

@@ -154,7 +154,10 @@ def convert_visdrone_to_yolo_obb(visdrone_dir: Path) -> Path:
                         except (ValueError, IndexError):
                             continue
 
-            out_lbl_file.write_text("".join(obb_lines), encoding="utf-8")
+            lbl_text = "".join(obb_lines)
+            out_lbl_file.write_text(lbl_text, encoding="utf-8")
+            if fallback_lbl_dir != out_lbl_dir and fallback_lbl_dir.exists():
+                (fallback_lbl_dir / f"{img_path.stem}.txt").write_text(lbl_text, encoding="utf-8")
 
     # Generate dataset YAML for Ultralytics
     yaml_dict = {

@@ -103,42 +103,65 @@ class AerialOBBDataset:
         if max_samples:
             all_imgs = all_imgs[:max_samples]
 
-        # Fast direct label resolution when static label directory is present
-        if lbl_dir and lbl_dir.exists():
-            for img_path in all_imgs:
-                candidate = lbl_dir / f"{img_path.stem}.txt"
-                self.samples.append({
-                    "image_path": img_path,
-                    "label_path": candidate if candidate.exists() else None,
-                })
-            return
+        # Comprehensive candidate label directories
+        candidate_lbl_dirs = []
+        if lbl_dir and lbl_dir.exists() and lbl_dir.is_dir():
+            candidate_lbl_dirs.append(lbl_dir)
 
-        # Fallback candidate label search if lbl_dir is not found
-        candidate_lbl_dirs = [
+        candidate_lbl_dirs.extend([
             self.data_dir / "labels" / self.split,
             self.data_dir / self.split / "labels",
+            self.data_dir / "labelTxt" / self.split,
+            self.data_dir / self.split / "labelTxt",
+            self.data_dir / "labels-v1.5" / self.split,
+            self.data_dir / self.split / "labels-v1.5",
+            self.data_dir / "labelTxt-v1.5" / self.split,
+            self.data_dir / self.split / "labelTxt-v1.5",
             self.data_dir / self.split / "annfile",
+            self.data_dir / "annfile" / self.split,
             self.data_dir / self.split / "xml_labels",
             self.data_dir / f"VisDrone2019-DET-{self.split}" / "annotations",
             self.data_dir / f"VisDrone2019-DET-{self.split}" / "labels",
             self.data_dir / "annotations" / self.split,
             self.data_dir / "yolo_obb" / "labels" / self.split,
             self.data_dir / self.split,
-        ]
-        valid_lbl_dirs = [d for d in candidate_lbl_dirs if d.exists() and d.is_dir()]
+        ])
+
+        # Filter and prioritize directories containing actual .txt annotation files
+        seen_dirs = set()
+        valid_lbl_dirs = []
+        for d in candidate_lbl_dirs:
+            resolved_d = d.resolve() if d.exists() else None
+            if resolved_d and resolved_d.is_dir() and str(resolved_d) not in seen_dirs:
+                seen_dirs.add(str(resolved_d))
+                txt_count = len(list(resolved_d.glob("*.txt")))
+                if txt_count > 0:
+                    valid_lbl_dirs.append((resolved_d, txt_count))
+
+        # Sort candidate directories with the most .txt files first
+        valid_lbl_dirs.sort(key=lambda item: item[1], reverse=True)
+        active_lbl_dirs = [item[0] for item in valid_lbl_dirs]
 
         for img_path in all_imgs:
             lbl_path = None
             stem = img_path.stem
-            for ld in valid_lbl_dirs:
+            for ld in active_lbl_dirs:
                 candidate = ld / f"{stem}.txt"
-                if candidate.exists():
+                if candidate.exists() and candidate.is_file():
                     lbl_path = candidate
                     break
             self.samples.append({
                 "image_path": img_path,
                 "label_path": lbl_path,
             })
+
+        labeled_count = sum(1 for s in self.samples if s["label_path"] is not None)
+        if labeled_count == 0 and len(self.samples) > 0 and self.split != "test":
+            print(
+                f"[!] WARNING: Found {len(self.samples)} images for '{self.dataset_name}' ({self.split}) "
+                f"but 0 label files across candidate directories!",
+                file=sys.stderr,
+            )
 
     def __len__(self) -> int:
         return len(self.samples)

@@ -324,10 +324,8 @@ def run_single_evaluation(
             ground_truth_hints=batch_gt if is_test else None,
         )
 
-        for i, img_idx in enumerate(range(sample_idx, end_idx)):
-            img = batch_imgs[i]
-            w_img, h_img = img.size
-            gt_dict = dataset.get_ground_truth(img_idx, img_width=w_img, img_height=h_img)
+        for i in range(len(batch_imgs)):
+            gt_dict = batch_gt[i]
             pred_dict = batch_preds[i]
 
             all_gt.append(gt_dict)
@@ -362,7 +360,14 @@ def run_single_evaluation(
         if mem_status["status"] in ("warning", "recovered"):
             deep_cleanup_memory()
 
-    clear_batch_progress(results_dir, run_id, dataset_name, model_name)
+    total_gt_count = sum(sum(len(c.get("boxes", [])) for c in gt) for gt in all_gt)
+    total_pred_count = sum(sum(len(c.get("boxes", [])) for c in pr) for pr in all_preds)
+    if total_gt_count == 0 and num_samples > 0:
+        print(
+            f"      [!] WARNING: 0 ground-truth annotations found across {num_samples} samples in '{dataset_name}'! "
+            f"Please verify dataset labels.",
+            file=sys.stderr,
+        )
 
     map_results = compute_map_metrics(all_gt, all_preds, class_names)
     cm, cm_labels = compute_detection_confusion_matrix(all_gt, all_preds, class_names, iou_threshold=iou_thresh)

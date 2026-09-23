@@ -13,14 +13,14 @@ Thumbs.db
 *.key
 credentials.json
 
-# Large data & weights
-data/
-weights/
+# Large data & weights (root level only)
+/data/
+/weights/
 *.pt
 *.pth
 
-# Temporary & single-use scratch files
-scratch/
+# Temporary & single-use scratch files (root level only)
+/scratch/
 *.tmp
 *.tmp.*
 *.log

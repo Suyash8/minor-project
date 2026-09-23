@@ -5,6 +5,7 @@ Markdown and terminal reporting utilities for benchmark analysis.
 from __future__ import annotations
 
 from typing import List, Dict, Any
+import math
 
 def format_metrics_table(results: List[Dict[str, Any]]) -> str:
     """
@@ -26,6 +27,13 @@ def format_metrics_table(results: List[Dict[str, Any]]) -> str:
     lines.append(sep_str)
 
     for row in results:
+        ang_mae = row.get("angle_mae")
+        ang_str = f"{ang_mae:.2f}°" if (ang_mae is not None and not math.isnan(ang_mae)) else "N/A"
+        pr = row.get("pearson_r")
+        pr_str = f"{pr:.3f}" if (pr is not None and not math.isnan(pr)) else "N/A"
+        r2 = row.get("r2_score")
+        r2_str = f"{r2:.3f}" if (r2 is not None and not math.isnan(r2)) else "N/A"
+
         vals = [
             f"{row.get('model', 'N/A'):<{col_widths[0]}}",
             f"{row.get('dataset', 'N/A'):<{col_widths[1]}}",
@@ -36,9 +44,9 @@ def format_metrics_table(results: List[Dict[str, Any]]) -> str:
             f"{row.get('recall', 0.0):.3f}",
             f"{row.get('f1', 0.0):.3f}",
             f"{row.get('accuracy', 0.0):.3f}",
-            f"{row.get('angle_mae', 0.0):.2f}°",
-            f"{row.get('pearson_r', 0.0):.3f}",
-            f"{row.get('r2_score', 0.0):.3f}",
+            f"{ang_str}",
+            f"{pr_str}",
+            f"{r2_str}",
             f"{row.get('fps', 0.0):.1f}",
         ]
         row_str = " | ".join(f"{v:^{w}}" for v, w in zip(vals, col_widths))

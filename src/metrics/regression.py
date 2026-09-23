@@ -62,15 +62,15 @@ def compute_regression_metrics(
     if len(matched_gt_boxes) == 0:
         return {
             "num_matched": 0,
-            "angle_mae": 0.0,
-            "angle_rmse": 0.0,
-            "angle_pearson_r": 0.0,
-            "angle_spearman_rho": 0.0,
-            "angle_r2": 0.0,
-            "center_offset_mae": 0.0,
-            "center_offset_rmse": 0.0,
-            "aspect_ratio_r2": 0.0,
-            "aspect_ratio_pearson_r": 0.0,
+            "angle_mae": float("nan"),
+            "angle_rmse": float("nan"),
+            "angle_pearson_r": float("nan"),
+            "angle_spearman_rho": float("nan"),
+            "angle_r2": float("nan"),
+            "center_offset_mae": float("nan"),
+            "center_offset_rmse": float("nan"),
+            "aspect_ratio_r2": float("nan"),
+            "aspect_ratio_pearson_r": float("nan"),
         }
 
     gt_angles = matched_gt_boxes[:, 4]

@@ -509,10 +509,17 @@ def run_evaluation_suite(
             }
             phase_summary_rows.append(summary_item)
 
+            ang_mae = reg_res["angle_mae"]
+            ang_str = f"{ang_mae:.2f}°" if (ang_mae is not None and not np.isnan(ang_mae)) else "N/A"
+            pr = reg_res["angle_pearson_r"]
+            pr_str = f"{pr:.3f}" if (pr is not None and not np.isnan(pr)) else "N/A"
+            r2 = reg_res["angle_r2"]
+            r2_str = f"{r2:.3f}" if (r2 is not None and not np.isnan(r2)) else "N/A"
+
             print(
                 f"      [mAP50: {map_res['map50']:.3f} | mAP75: {map_res['map75']:.3f} | F1: {cls_res['macro_f1']:.3f} | "
-                f"Angle MAE: {reg_res['angle_mae']:.2f}° | Pearson r: {reg_res['angle_pearson_r']:.3f} | "
-                f"R²: {reg_res['angle_r2']:.3f} | FPS: {perf_res['fps']:.1f}]"
+                f"Angle MAE: {ang_str} | Pearson r: {pr_str} | "
+                f"R²: {r2_str} | FPS: {perf_res['fps']:.1f}]"
             )
 
             save_evaluation_checkpoint(

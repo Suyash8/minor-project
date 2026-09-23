@@ -62,10 +62,8 @@ def evaluate_class_detection(
         for b, s in zip(boxes[mask], scores[mask]):
             all_preds.append((float(s), img_idx, b))
 
-    if n_gt == 0 and len(all_preds) == 0:
-        return {"ap": 1.0, "precision": 1.0, "recall": 1.0, "tp": 0, "fp": 0, "fn": 0}
     if n_gt == 0:
-        return {"ap": 0.0, "precision": 0.0, "recall": 1.0, "tp": 0, "fp": len(all_preds), "fn": 0}
+        return {"ap": 0.0, "precision": 0.0, "recall": 0.0, "tp": 0, "fp": len(all_preds), "fn": 0}
     if len(all_preds) == 0:
         return {"ap": 0.0, "precision": 0.0, "recall": 0.0, "tp": 0, "fp": 0, "fn": n_gt}
 
@@ -135,6 +133,7 @@ def compute_map_metrics(
     ap_small_list = []
     ap_med_list = []
     ap_large_list = []
+    classes_with_gt = []
 
     for c in range(num_classes):
         gt_cls = [all_gt[img][c] for img in range(num_images)]
@@ -162,10 +161,15 @@ def compute_map_metrics(
         ap_med_list.append(ap_m)
         ap_large_list.append(ap_l)
 
+        n_gt_c = sum(len(g.get("boxes", [])) for g in gt_cls)
+        if n_gt_c > 0:
+            classes_with_gt.append(c)
+
+    eval_indices = classes_with_gt if len(classes_with_gt) > 0 else list(range(num_classes))
     return {
-        "map50": float(np.mean(ap50_per_class)),
-        "map75": float(np.mean(ap75_per_class)),
-        "map50_95": float(np.mean(range_ap_per_class)),
+        "map50": float(np.mean([ap50_per_class[i] for i in eval_indices])),
+        "map75": float(np.mean([ap75_per_class[i] for i in eval_indices])),
+        "map50_95": float(np.mean([range_ap_per_class[i] for i in eval_indices])),
         "ap_small": float(np.mean(ap_small_list)),
         "ap_medium": float(np.mean(ap_med_list)),
         "ap_large": float(np.mean(ap_large_list)),

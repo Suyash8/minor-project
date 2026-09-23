@@ -11,7 +11,7 @@ from typing import List, Dict, Any, Optional, Tuple
 import numpy as np
 from PIL import Image
 
-from src.config import DATASET_CLASSES
+from src.config import DATASET_CLASSES, DATASET_STATIC_PATHS
 
 def polygon_to_obb_params(pts: np.ndarray) -> Tuple[float, float, float, float, float]:
     """
@@ -65,34 +65,55 @@ class AerialOBBDataset:
         self._discover_samples(max_samples)
 
     def _discover_samples(self, max_samples: Optional[int] = None) -> None:
-        """Find image and label file pairs across all supported directory conventions."""
-        candidate_img_dirs = [
-            self.data_dir / "images" / self.split,
-            self.data_dir / self.split / "images",
-            self.data_dir / f"VisDrone2019-DET-{self.split}" / "images",
-            self.data_dir / f"VisDrone2019-DET-{self.split}",
-            self.data_dir / "yolo_obb" / "images" / self.split,
-            self.data_dir / self.split,
-        ]
+        """Find image and label file pairs directly using static dataset paths."""
+        static_info = DATASET_STATIC_PATHS.get(self.dataset_name, {}).get(self.split)
+        img_dir = None
+        lbl_dir = None
 
-        # Find the directory with the most valid images
-        best_img_dir = None
-        best_imgs = []
-        for d in candidate_img_dirs:
-            if d.exists() and d.is_dir():
-                imgs = [p for p in d.iterdir() if p.is_file() and p.suffix.lower() in (".jpg", ".jpeg", ".png", ".bmp")]
-                if len(imgs) > len(best_imgs):
-                    best_imgs = imgs
-                    best_img_dir = d
+        if static_info:
+            direct_img = self.data_dir / static_info["images"]
+            direct_lbl = (self.data_dir / static_info["labels"]) if static_info.get("labels") else None
+            if direct_img.exists() and direct_img.is_dir():
+                img_dir = direct_img
+                lbl_dir = direct_lbl
 
-        if not best_img_dir or not best_imgs:
-            return
+        # Fallback dynamic search if static directory is not found
+        if not img_dir:
+            candidate_img_dirs = [
+                self.data_dir / "images" / self.split,
+                self.data_dir / self.split / "images",
+                self.data_dir / f"VisDrone2019-DET-{self.split}" / "images",
+                self.data_dir / f"VisDrone2019-DET-{self.split}",
+                self.data_dir / "yolo_obb" / "images" / self.split,
+                self.data_dir / self.split,
+            ]
+            best_imgs = []
+            for d in candidate_img_dirs:
+                if d.exists() and d.is_dir():
+                    imgs = [p for p in d.iterdir() if p.is_file() and p.suffix.lower() in (".jpg", ".jpeg", ".png", ".bmp")]
+                    if len(imgs) > len(best_imgs):
+                        best_imgs = imgs
+                        img_dir = d
+            if not img_dir:
+                return
+            all_imgs = sorted(best_imgs)
+        else:
+            all_imgs = sorted([p for p in img_dir.iterdir() if p.is_file() and p.suffix.lower() in (".jpg", ".jpeg", ".png", ".bmp")])
 
-        all_imgs = sorted(best_imgs)
         if max_samples:
             all_imgs = all_imgs[:max_samples]
 
-        # Candidate label directories to search for matching labels
+        # Fast direct label resolution when static label directory is present
+        if lbl_dir and lbl_dir.exists():
+            for img_path in all_imgs:
+                candidate = lbl_dir / f"{img_path.stem}.txt"
+                self.samples.append({
+                    "image_path": img_path,
+                    "label_path": candidate if candidate.exists() else None,
+                })
+            return
+
+        # Fallback candidate label search if lbl_dir is not found
         candidate_lbl_dirs = [
             self.data_dir / "labels" / self.split,
             self.data_dir / self.split / "labels",

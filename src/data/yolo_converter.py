@@ -16,7 +16,7 @@ import numpy as np
 from PIL import Image
 import yaml
 
-from src.config import DATASET_CLASSES, DEFAULT_DATA_DIR
+from src.config import DATASET_CLASSES, DEFAULT_DATA_DIR, DATASET_STATIC_PATHS
 
 
 def normalize_box_corners(pts: np.ndarray, img_w: int, img_h: int) -> np.ndarray:
@@ -61,26 +61,34 @@ def convert_visdrone_to_yolo_obb(visdrone_dir: Path) -> Path:
     out_yaml = visdrone_dir / "visdrone_yolo_obb.yaml"
 
     for split in ["train", "val"]:
-        candidate_img_dirs = [
-            visdrone_dir / "images" / split,
-            visdrone_dir / split / "images",
-            visdrone_dir / f"VisDrone2019-DET-{split}" / "images",
-            visdrone_dir / f"VisDrone2019-DET-{split}",
-            visdrone_dir / split,
-        ]
-        img_dir = next((d for d in candidate_img_dirs if d.exists() and d.is_dir()), None)
-        if not img_dir:
-            continue
+        static_p = DATASET_STATIC_PATHS["visdrone"].get(split, {})
+        direct_img = (visdrone_dir / static_p["images"]) if static_p.get("images") else None
+        direct_ann = (visdrone_dir / static_p["labels"]) if static_p.get("labels") else None
 
-        candidate_ann_dirs = [
-            visdrone_dir / "annotations" / split,
-            visdrone_dir / split / "annotations",
-            visdrone_dir / f"VisDrone2019-DET-{split}" / "annotations",
-            visdrone_dir / f"VisDrone2019-DET-{split}" / "labels",
-            visdrone_dir / "labels" / split,
-            visdrone_dir / split,
-        ]
-        ann_dir = next((d for d in candidate_ann_dirs if d.exists() and d.is_dir()), None)
+        if direct_img and direct_img.exists() and direct_img.is_dir():
+            img_dir = direct_img
+            ann_dir = direct_ann
+        else:
+            candidate_img_dirs = [
+                visdrone_dir / "images" / split,
+                visdrone_dir / split / "images",
+                visdrone_dir / f"VisDrone2019-DET-{split}" / "images",
+                visdrone_dir / f"VisDrone2019-DET-{split}",
+                visdrone_dir / split,
+            ]
+            img_dir = next((d for d in candidate_img_dirs if d.exists() and d.is_dir()), None)
+            if not img_dir:
+                continue
+
+            candidate_ann_dirs = [
+                visdrone_dir / "annotations" / split,
+                visdrone_dir / split / "annotations",
+                visdrone_dir / f"VisDrone2019-DET-{split}" / "annotations",
+                visdrone_dir / f"VisDrone2019-DET-{split}" / "labels",
+                visdrone_dir / "labels" / split,
+                visdrone_dir / split,
+            ]
+            ann_dir = next((d for d in candidate_ann_dirs if d.exists() and d.is_dir()), None)
 
         out_lbl_dir = resolve_ultralytics_label_dir(img_dir)
 
@@ -151,8 +159,8 @@ def convert_visdrone_to_yolo_obb(visdrone_dir: Path) -> Path:
     # Generate dataset YAML for Ultralytics
     yaml_dict = {
         "path": str(visdrone_dir),
-        "train": "images/train",
-        "val": "images/val",
+        "train": DATASET_STATIC_PATHS["visdrone"]["train"]["images"],
+        "val": DATASET_STATIC_PATHS["visdrone"]["val"]["images"],
         "names": {i: c for i, c in enumerate(classes)},
     }
     with open(out_yaml, "w", encoding="utf-8") as f:
@@ -233,8 +241,8 @@ def convert_dota_to_yolo_obb(dota_dir: Path) -> Path:
 
     yaml_dict = {
         "path": str(dota_dir),
-        "train": "images/train",
-        "val": "images/val",
+        "train": DATASET_STATIC_PATHS["dota"]["train"]["images"],
+        "val": DATASET_STATIC_PATHS["dota"]["val"]["images"],
         "names": {i: c for i, c in enumerate(classes)},
     }
     with open(out_yaml, "w", encoding="utf-8") as f:
@@ -255,23 +263,31 @@ def convert_codrone_to_yolo_obb(codrone_dir: Path) -> Path:
     out_yaml = codrone_dir / "codrone_yolo_obb.yaml"
 
     for split in ["train", "val"]:
-        candidate_img_dirs = [
-            codrone_dir / "images" / split,
-            codrone_dir / split / "images",
-            codrone_dir / split,
-        ]
-        img_dir = next((d for d in candidate_img_dirs if d.exists() and d.is_dir()), None)
-        if not img_dir:
-            continue
+        static_p = DATASET_STATIC_PATHS["codrone"].get(split, {})
+        direct_img = (codrone_dir / static_p["images"]) if static_p.get("images") else None
+        direct_lbl = (codrone_dir / static_p["labels"]) if static_p.get("labels") else None
 
-        candidate_lbl_dirs = [
-            codrone_dir / "labels" / split,
-            codrone_dir / split / "labels",
-            codrone_dir / split / "annfile",
-            codrone_dir / split / "xml_labels",
-            codrone_dir / split,
-        ]
-        lbl_dir = next((d for d in candidate_lbl_dirs if d.exists() and d.is_dir()), None)
+        if direct_img and direct_img.exists() and direct_img.is_dir():
+            img_dir = direct_img
+            lbl_dir = direct_lbl
+        else:
+            candidate_img_dirs = [
+                codrone_dir / "images" / split,
+                codrone_dir / split / "images",
+                codrone_dir / split,
+            ]
+            img_dir = next((d for d in candidate_img_dirs if d.exists() and d.is_dir()), None)
+            if not img_dir:
+                continue
+
+            candidate_lbl_dirs = [
+                codrone_dir / "labels" / split,
+                codrone_dir / split / "labels",
+                codrone_dir / split / "annfile",
+                codrone_dir / split / "xml_labels",
+                codrone_dir / split,
+            ]
+            lbl_dir = next((d for d in candidate_lbl_dirs if d.exists() and d.is_dir()), None)
 
         out_lbl_dir = resolve_ultralytics_label_dir(img_dir)
 
@@ -336,8 +352,8 @@ def convert_codrone_to_yolo_obb(codrone_dir: Path) -> Path:
 
     yaml_dict = {
         "path": str(codrone_dir),
-        "train": "images/train",
-        "val": "images/val",
+        "train": DATASET_STATIC_PATHS["codrone"]["train"]["images"],
+        "val": DATASET_STATIC_PATHS["codrone"]["val"]["images"],
         "names": {i: c for i, c in enumerate(classes)},
     }
     with open(out_yaml, "w", encoding="utf-8") as f:

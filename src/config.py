@@ -178,3 +178,50 @@ SCALE_THRESHOLDS = {
     "medium": (32 ** 2, 96 ** 2),   # 1024 to 9216 px^2
     "large": (96 ** 2, float("inf")), # > 9216 px^2
 }
+
+# Static deterministic dataset folder paths relative to each dataset directory
+DATASET_STATIC_PATHS: Dict[str, Dict[str, Dict[str, Optional[str]]]] = {
+    "codrone": {
+        "val": {
+            "images": "val/images",
+            "labels": "val/annfile",
+        },
+        "train": {
+            "images": "train/images",
+            "labels": "train/annfile",
+        },
+        "test": {
+            "images": "test/images",
+            "labels": "test/annfile",
+        },
+    },
+    "visdrone": {
+        "val": {
+            "images": "VisDrone2019-DET-val/images",
+            "labels": "VisDrone2019-DET-val/annotations",
+        },
+        "train": {
+            "images": "VisDrone2019-DET-train/images",
+            "labels": "VisDrone2019-DET-train/annotations",
+        },
+        "test": {
+            "images": "VisDrone2019-DET-test-dev/images",
+            "labels": "VisDrone2019-DET-test-dev/annotations",
+        },
+    },
+    "dota": {
+        "val": {
+            "images": "images/val",
+            "labels": "labels/val",
+        },
+        "train": {
+            "images": "images/train",
+            "labels": "labels/train",
+        },
+        "test": {
+            "images": "images/test",
+            "labels": None,
+        },
+    },
+}
+

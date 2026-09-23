@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Dict, Any, Optional
 import requests
 
-from src.config import DATASET_CLASSES
+from src.config import DATASET_CLASSES, DATASET_STATIC_PATHS
 
 DATASET_METADATA: Dict[str, Dict[str, Any]] = {
     "visdrone": {
@@ -132,26 +132,35 @@ def verify_dataset_status(dataset_name: str, data_dir: Path) -> Dict[str, Any]:
     if not target_dir.exists():
         return status
 
-    # Search for image directories across all known directory conventions
+    # Fast check using explicit static dataset paths
+    static_splits = DATASET_STATIC_PATHS.get(dataset_name.lower(), {})
     for split in ["val", "test", "train"]:
-        candidates = [
-            target_dir / "images" / split,
-            target_dir / split / "images",
-            target_dir / f"VisDrone2019-DET-{split}" / "images",
-            target_dir / f"VisDrone2019-DET-{split}",
-            target_dir / "yolo_obb" / "images" / split,
-            target_dir / split,
-        ]
-        best_count = 0
-        for cand in candidates:
-            if cand.exists() and cand.is_dir():
-                imgs = [p for p in cand.iterdir() if p.is_file() and p.suffix.lower() in (".jpg", ".jpeg", ".png", ".bmp")]
-                if len(imgs) > best_count:
-                    best_count = len(imgs)
+        count = 0
+        if split in static_splits:
+            rel_img = static_splits[split]["images"]
+            static_p = target_dir / rel_img
+            if static_p.exists() and static_p.is_dir():
+                count = len([p for p in static_p.iterdir() if p.is_file() and p.suffix.lower() in (".jpg", ".jpeg", ".png", ".bmp")])
 
-        if best_count > 0:
+        # Dynamic fallback if not found at static path
+        if count == 0:
+            candidates = [
+                target_dir / "images" / split,
+                target_dir / split / "images",
+                target_dir / f"VisDrone2019-DET-{split}" / "images",
+                target_dir / f"VisDrone2019-DET-{split}",
+                target_dir / "yolo_obb" / "images" / split,
+                target_dir / split,
+            ]
+            for cand in candidates:
+                if cand.exists() and cand.is_dir():
+                    imgs = [p for p in cand.iterdir() if p.is_file() and p.suffix.lower() in (".jpg", ".jpeg", ".png", ".bmp")]
+                    if len(imgs) > count:
+                        count = len(imgs)
+
+        if count > 0:
             status["splits_found"].append(split)
-            status["num_images"] += best_count
+            status["num_images"] += count
 
     status["ready"] = status["num_images"] > 0
     return status

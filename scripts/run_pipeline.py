@@ -185,6 +185,13 @@ def parse_args():
         default=640,
         help="Input image resolution for model training.",
     )
+    parser.add_argument(
+        "--cache",
+        type=str,
+        default=None,
+        choices=[None, "ram", "disk"],
+        help="Cache dataset images in RAM or disk to eliminate I/O bottleneck on high-RAM machines.",
+    )
 
     # Dataset & Storage Directories
     parser.add_argument(
@@ -577,6 +584,7 @@ def run_training_suite(
                         imgsz=train_imgsz,
                         device=device,
                         workers=train_workers,
+                        cache=getattr(args, "cache", None),
                         resume=args.resume,
                         project_dir=str(weights_dir),
                         data_dir=str(data_dir),

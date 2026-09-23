@@ -224,10 +224,15 @@ def train_custom_detector(
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-5)
     device_type = "cuda" if dev.type == "cuda" else "cpu"
+    use_bf16 = False
+    if dev.type == "cuda" and hasattr(torch.cuda, "is_bf16_supported") and torch.cuda.is_bf16_supported():
+        use_bf16 = True
+    amp_dtype = torch.bfloat16 if use_bf16 else torch.float16
+
     if hasattr(torch, "amp") and hasattr(torch.amp, "GradScaler"):
-        scaler = torch.amp.GradScaler(device_type, enabled=(dev.type == "cuda"))
+        scaler = torch.amp.GradScaler(device_type, enabled=(dev.type == "cuda" and not use_bf16))
     else:
-        scaler = torch.cuda.amp.GradScaler(enabled=(dev.type == "cuda"))
+        scaler = torch.cuda.amp.GradScaler(enabled=(dev.type == "cuda" and not use_bf16))
 
     # 4. Checkpoint Setup
     paths = resolve_pipeline_paths()
@@ -263,7 +268,7 @@ def train_custom_detector(
             reg_tgt = reg_tgt.to(dev, non_blocking=True)
 
             optimizer.zero_grad()
-            amp_ctx = torch.amp.autocast(device_type, enabled=(dev.type == "cuda")) if hasattr(torch, "amp") and hasattr(torch.amp, "autocast") else torch.cuda.amp.autocast(enabled=(dev.type == "cuda"))
+            amp_ctx = torch.amp.autocast(device_type, dtype=amp_dtype, enabled=(dev.type == "cuda")) if hasattr(torch, "amp") and hasattr(torch.amp, "autocast") else torch.cuda.amp.autocast(enabled=(dev.type == "cuda"))
             with amp_ctx:
                 cls_logits, reg_out = model(imgs)
                 loss_dict = criterion(cls_logits, reg_out, cls_tgt, reg_tgt)
@@ -295,7 +300,7 @@ def train_custom_detector(
                 cls_tgt = cls_tgt.to(dev, non_blocking=True)
                 reg_tgt = reg_tgt.to(dev, non_blocking=True)
 
-                amp_ctx_val = torch.amp.autocast(device_type, enabled=(dev.type == "cuda")) if hasattr(torch, "amp") and hasattr(torch.amp, "autocast") else torch.cuda.amp.autocast(enabled=(dev.type == "cuda"))
+                amp_ctx_val = torch.amp.autocast(device_type, dtype=amp_dtype, enabled=(dev.type == "cuda")) if hasattr(torch, "amp") and hasattr(torch.amp, "autocast") else torch.cuda.amp.autocast(enabled=(dev.type == "cuda"))
                 with amp_ctx_val:
                     cls_logits, reg_out = model(imgs)
                     loss_dict = criterion(cls_logits, reg_out, cls_tgt, reg_tgt)

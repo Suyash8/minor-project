@@ -82,6 +82,13 @@ def parse_args():
         help="Number of background data-loading worker processes.",
     )
     parser.add_argument(
+        "--cache",
+        type=str,
+        default=None,
+        choices=[None, "ram", "disk"],
+        help="Cache dataset images in RAM or disk to eliminate I/O bottleneck on high-RAM machines.",
+    )
+    parser.add_argument(
         "--resume",
         type=lambda x: str(x).lower() in ("true", "1", "yes"),
         default=True,
@@ -150,6 +157,7 @@ def main():
                         imgsz=args.imgsz,
                         device=args.device,
                         workers=args.workers,
+                        cache=args.cache,
                         resume=args.resume,
                         project_dir=str(paths["weights_dir"]),
                         data_dir=str(paths["data_dir"]),

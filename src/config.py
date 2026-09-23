@@ -141,9 +141,19 @@ UNIFIED_CLASSES: List[str] = [
 
 # Supported model architectures
 SUPPORTED_MODELS: List[str] = [
+    # Nano models (edge, lightweight, T4 friendly)
     "yolov8n-obb",
-    "yolov8s-obb",
     "yolo11n-obb",
+    # Small models (balanced speed/accuracy)
+    "yolov8s-obb",
+    "yolo11s-obb",
+    # Medium models (high capacity for A100/L4/V100)
+    "yolov8m-obb",
+    "yolo11m-obb",
+    # Large models (maximum representation capacity)
+    "yolov8l-obb",
+    "yolo11l-obb",
+    # Custom PyTorch Anchor-Free detector
     "custom-obb",
 ]
 

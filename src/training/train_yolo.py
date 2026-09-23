@@ -27,6 +27,7 @@ def train_yolo_obb(
     device: str = "auto",
     workers: int = 4,
     lr0: float = 0.01,
+    cache: Optional[str] = None,
     pretrained_weights: Optional[str] = None,
     resume: bool = True,
     project_dir: Optional[str] = None,
@@ -81,9 +82,16 @@ def train_yolo_obb(
     else:
         init_weights = pretrained_weights or f"{model_name}.pt"
         print(f"[*] Initializing model with base weights: {init_weights}")
-        model = YOLO(init_weights)
+    # 4. Configure Precision (BF16 for Ampere/Hopper like A100/L4, FP16 for Turing like T4)
+    use_bf16 = False
+    use_half = False
+    if dev != "cpu" and torch.cuda.is_available():
+        if hasattr(torch.cuda, "is_bf16_supported") and torch.cuda.is_bf16_supported():
+            use_bf16 = True
+        else:
+            use_half = True
 
-    # 4. Execute Native Ultralytics Training
+    # 5. Execute Native Ultralytics Training
     start_time = time.time()
     train_args = {
         "data": str(yaml_path),
@@ -91,17 +99,20 @@ def train_yolo_obb(
         "batch": batch_size,
         "imgsz": imgsz,
         "device": dev,
-        "workers": workers if dev != "cpu" else 2,
+        "workers": workers if dev != "cpu" else 0,
         "lr0": lr0,
         "save_period": 1,        # Save checkpoint after EVERY single epoch
         "save": True,
         "project": str(weights_dir),
         "name": run_name,
         "exist_ok": True,
-        "half": True if dev != "cpu" else False, # Tensor Core FP16 acceleration
+        "half": use_half,
+        "bfloat16": use_bf16,
         "verbose": True,
         "resume": can_resume,
     }
+    if cache and str(cache).lower() in ("ram", "disk", "true", "1"):
+        train_args["cache"] = str(cache).lower() if str(cache).lower() in ("ram", "disk") else True
 
     results = model.train(**train_args)
     elapsed_minutes = (time.time() - start_time) / 60.0

@@ -7,7 +7,7 @@ and challenging road clutter to test the entire pipeline in seconds.
 import math
 import random
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Any, Optional
 import numpy as np
 from PIL import Image, ImageDraw
 

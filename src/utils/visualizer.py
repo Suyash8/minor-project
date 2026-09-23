@@ -3,6 +3,8 @@ Plotting and visual artifact generation for OBB detection evaluation.
 Uses headless matplotlib (Agg backend) for reliable execution in scripts and Colab.
 """
 
+from __future__ import annotations
+
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 import numpy as np

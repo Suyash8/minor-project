@@ -2,6 +2,8 @@
 Multi-class Detection Confusion Matrix with Background (False Positive / False Negative) handling.
 """
 
+from __future__ import annotations
+
 from typing import List, Dict, Any, Tuple
 import numpy as np
 from src.metrics.geometry import compute_obb_iou_matrix

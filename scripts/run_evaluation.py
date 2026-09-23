@@ -1,3 +1,5 @@
+
+from __future__ import annotations
 #!/usr/bin/env python3
 """
 Dedicated evaluation script for evaluating a single model checkpoint against a dataset.

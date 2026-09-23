@@ -3,6 +3,8 @@ Dataset Download & Ingestion Manager for VisDrone, CODrone, and DOTA.
 Handles automated retrieval, archive extraction, validation, and manual download guidance.
 """
 
+from __future__ import annotations
+
 import os
 import sys
 import shutil

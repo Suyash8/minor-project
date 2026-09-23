@@ -2,6 +2,8 @@
 Central Configuration for Datasets, Models, and Evaluation Metrics.
 """
 
+from __future__ import annotations
+
 import os
 from pathlib import Path
 from typing import Dict, List, Any, Optional

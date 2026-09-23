@@ -3,6 +3,8 @@ Mean Average Precision (mAP) computation for Oriented Bounding Box detection.
 Computes mAP@0.50, mAP@0.75, mAP@0.50:0.95, and scale-specific AP (AP_s, AP_m, AP_l).
 """
 
+from __future__ import annotations
+
 from typing import List, Dict, Any, Tuple
 import numpy as np
 from src.metrics.geometry import compute_obb_iou_matrix

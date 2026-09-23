@@ -2,6 +2,8 @@
 Markdown and terminal reporting utilities for benchmark analysis.
 """
 
+from __future__ import annotations
+
 from typing import List, Dict, Any
 
 def format_metrics_table(results: List[Dict[str, Any]]) -> str:

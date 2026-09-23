@@ -2,6 +2,8 @@
 Comprehensive evaluation metrics suite for Aerial OBB Detection.
 """
 
+from __future__ import annotations
+
 from .geometry import (
     obb_to_corners,
     polygon_to_obb_params,

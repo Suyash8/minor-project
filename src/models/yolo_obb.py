@@ -3,6 +3,8 @@ Ultralytics YOLO-OBB Model Wrapper (YOLOv8-OBB and YOLO11-OBB).
 Provides standardized OBB prediction parsing and robust fallback handling.
 """
 
+from __future__ import annotations
+
 import math
 from pathlib import Path
 from typing import List, Dict, Any, Optional

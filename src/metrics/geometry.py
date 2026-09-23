@@ -3,6 +3,8 @@ Geometric operations for Oriented Bounding Boxes (OBB).
 Supports box-to-polygon conversion, rotated IoU, and Gaussian distance metrics (GWD & KLD).
 """
 
+from __future__ import annotations
+
 import math
 from typing import List, Tuple, Optional
 import numpy as np

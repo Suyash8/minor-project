@@ -1,3 +1,5 @@
+
+from __future__ import annotations
 #!/usr/bin/env python3
 """
 Standalone report and visualization generator from saved benchmark results.

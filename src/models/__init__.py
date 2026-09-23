@@ -2,6 +2,8 @@
 Model registry and factory for Oriented Bounding Box Detectors.
 """
 
+from __future__ import annotations
+
 from typing import Optional
 from src.models.base import BaseOBBDetector
 from src.models.yolo_obb import YoloOBBDetector

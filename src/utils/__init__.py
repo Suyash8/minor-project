@@ -3,6 +3,8 @@ Utility modules for environment detection, visualization, reporting,
 atomic checkpointing, memory protection, and system security.
 """
 
+from __future__ import annotations
+
 from .env import is_colab, is_drive_mounted, get_drive_root, get_device_info, set_seed
 from .system import (
     get_available_ram_gb,

@@ -3,6 +3,8 @@ Classification metrics derived from detection confusion matrix:
 Precision, Recall, F1-Score, Specificity, and Detection Accuracy.
 """
 
+from __future__ import annotations
+
 from typing import Dict, Any, List
 import numpy as np
 

@@ -4,9 +4,11 @@ A pure PyTorch single-stage detector with an oriented regression head.
 Runs natively on both CPU and GPU without external compilation dependencies.
 """
 
+from __future__ import annotations
+
 import math
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple, Union
 import numpy as np
 from PIL import Image
 

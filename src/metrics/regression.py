@@ -4,6 +4,8 @@ Angle MAE, RMSE, Pearson Correlation (r), Spearman Rank Correlation (rho),
 R² Score, Center Offset Error, and Aspect Ratio Fit.
 """
 
+from __future__ import annotations
+
 from typing import Dict, Any, Tuple
 import numpy as np
 from scipy import stats

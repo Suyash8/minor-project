@@ -3,6 +3,8 @@ Unified Aerial OBB Dataset Reader.
 Parses annotations from YOLO-OBB, DOTA polygon, and VisDrone formats into a standardized internal representation.
 """
 
+from __future__ import annotations
+
 import math
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple

@@ -4,6 +4,8 @@ Generates synthetic aerial road scenes with perspective tilt, dense vehicles,
 and challenging road clutter to test the entire pipeline in seconds.
 """
 
+from __future__ import annotations
+
 import math
 import random
 from pathlib import Path

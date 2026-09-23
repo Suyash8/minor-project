@@ -1,27 +1,33 @@
-
-from __future__ import annotations
 #!/usr/bin/env python3
 """
-Master CLI Runner for Aerial OBB Detection, Evaluation & Comparative Analysis.
-Orchestrates dataset verification/download, multi-model evaluation, comprehensive metrics computation,
-confusion matrix extraction, continuous angle/box regression analysis, and report generation.
+Master CLI Runner for Aerial OBB Detection, Training, Evaluation & Comparative Analysis.
+Orchestrates:
+1. Pre-Training Baseline Evaluation (Zero-shot / base weights across datasets)
+2. GPU-Accelerated Training & Fine-Tuning Suite (YOLOv8-OBB, YOLO11-OBB, Custom PyTorch OBB)
+3. Post-Training Fine-Tuned Evaluation (Measuring empirical gains: delta mAP50, delta F1, delta Angle MAE)
+4. Comparative Delta Reporting & Visual Analysis
 
-Includes:
+Features:
 - Crash-resilient atomic checkpointing and resumption (--resume)
 - Automated Google Drive integration for Google Colab runtimes
 - Proactive RAM and CUDA memory verification, throttling, and garbage collection
-- Graceful shutdown signal handling (SIGINT, SIGTERM)
+- Multi-worker parallel data loading with PyTorch AMP FP16 mixed precision
 
 Usage:
-  # Instant CPU smoke test on laptop:
+  # Fast CPU smoke test with synthetic scenes (verifies pre-eval, training, post-eval, deltas, and plots):
   python scripts/run_pipeline.py --test --save-plots
 
-  # Run full benchmark across datasets:
-  python scripts/run_pipeline.py --datasets codrone visdrone --models yolov8n-obb custom-obb --save-plots
+  # Full pipeline on GPU (Pre-Train Baseline -> Train 15 Epochs -> Post-Train Eval -> Delta Report):
+  python scripts/run_pipeline.py --datasets visdrone codrone --models yolov8n-obb custom-obb --device cuda --save-plots
 
-  # In Google Colab with GPU:
-  python scripts/run_pipeline.py --datasets codrone --models yolov8n-obb yolo11n-obb --device cuda --save-plots
+  # Training Only:
+  python scripts/run_pipeline.py --mode train --datasets visdrone --models yolov8n-obb --epochs 20 --device cuda
+
+  # Evaluation Only:
+  python scripts/run_pipeline.py --mode eval --datasets visdrone --models yolov8n-obb --device cuda --save-plots
 """
+
+from __future__ import annotations
 
 import os
 import sys
@@ -30,7 +36,7 @@ import argparse
 import datetime
 import json
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 import numpy as np
 import pandas as pd
 
@@ -80,8 +86,13 @@ from src.utils.visualizer import (
     plot_confusion_matrix,
     plot_angle_correlation,
     plot_benchmark_comparison,
+    plot_pre_post_comparison,
 )
-from src.utils.reporter import format_metrics_table, generate_markdown_report
+from src.utils.reporter import (
+    format_metrics_table,
+    format_delta_table,
+    generate_markdown_report,
+)
 from src.data.dataset import AerialOBBDataset
 from src.data.downloader import download_dataset, verify_dataset_status
 from src.data.mock_data import create_mock_dataset
@@ -93,6 +104,8 @@ from src.metrics import (
     compute_regression_metrics,
     compute_obb_iou_matrix,
 )
+from src.training.train_yolo import train_yolo_obb
+from src.training.train_custom import train_custom_detector
 
 
 def str2bool(v):
@@ -103,11 +116,18 @@ def str2bool(v):
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Aerial OBB Detection & Benchmark Suite",
+        description="Aerial OBB Detection, Training & Benchmark Suite",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 
     # Core Execution Modes
+    parser.add_argument(
+        "--mode",
+        type=str,
+        default="full",
+        choices=["full", "train", "eval"],
+        help="Execution mode: 'full' (Pre-eval -> Train -> Post-eval -> Deltas), 'train' (Train only), 'eval' (Eval only).",
+    )
     parser.add_argument(
         "--test", "-t",
         action="store_true",
@@ -130,7 +150,7 @@ def parse_args():
     parser.add_argument(
         "--datasets",
         nargs="+",
-        default=["codrone"],
+        default=["visdrone"],
         help=f"Datasets to benchmark. Choices: {SUPPORTED_DATASETS} or 'all'",
     )
     parser.add_argument(
@@ -138,6 +158,32 @@ def parse_args():
         nargs="+",
         default=["yolov8n-obb", "custom-obb"],
         help=f"Models to evaluate. Choices: {SUPPORTED_MODELS} or 'all'",
+    )
+
+    # Training Hyperparameters
+    parser.add_argument(
+        "--epochs",
+        type=int,
+        default=15,
+        help="Number of training epochs per model/dataset combination.",
+    )
+    parser.add_argument(
+        "--train-batch-size",
+        type=int,
+        default=16,
+        help="Batch size for training. Tuned for GPU VRAM saturation (e.g. 16 or 32 on T4).",
+    )
+    parser.add_argument(
+        "--train-workers",
+        type=int,
+        default=4,
+        help="DataLoader worker processes for GPU training.",
+    )
+    parser.add_argument(
+        "--imgsz",
+        type=int,
+        default=640,
+        help="Input image resolution for model training.",
     )
 
     # Dataset & Storage Directories
@@ -156,7 +202,7 @@ def parse_args():
         "--weights-dir",
         type=str,
         default=str(DEFAULT_WEIGHTS_DIR),
-        help="Pretrained model weights directory.",
+        help="Pretrained/trained model weights directory.",
     )
     parser.add_argument(
         "--results-dir",
@@ -170,14 +216,14 @@ def parse_args():
         "--batch-size",
         type=int,
         default=8,
-        help="Inference batch size.",
+        help="Inference batch size for evaluation.",
     )
     parser.add_argument(
         "--device",
         type=str,
         default="auto",
         choices=["auto", "cpu", "cuda"],
-        help="Computing device for inference.",
+        help="Computing device for training and inference.",
     )
     parser.add_argument(
         "--iou-thresh",
@@ -243,14 +289,10 @@ def run_single_evaluation(
     total_batches = (num_samples + current_batch_size - 1) // current_batch_size
     start_time = time.time()
 
-    print(f"    [*] Starting evaluation: {num_samples} samples | Initial batch size: {current_batch_size}")
-    print(f"    [*] Initial Memory: {format_memory_summary()}")
-
     sample_idx = 0
     batch_idx = 0
 
     while sample_idx < num_samples:
-        # Check system memory pressure before each batch
         mem_status = check_memory_pressure(critical_ram_gb=1.0, max_usage_pct=90.0, auto_clean=True)
         if mem_status["should_throttle"] and current_batch_size > 1:
             current_batch_size = max(1, current_batch_size // 2)
@@ -267,13 +309,12 @@ def run_single_evaluation(
             for i, img_idx in enumerate(range(sample_idx, end_idx))
         ]
 
-        # Model inference
         batch_preds = model.predict(
             batch_imgs,
             conf_thresh=conf_thresh,
             iou_thresh=iou_thresh,
             class_names=class_names,
-            ground_truth_hints=batch_gt,
+            ground_truth_hints=batch_gt if is_test else None,
         )
 
         for i, img_idx in enumerate(range(sample_idx, end_idx)):
@@ -285,7 +326,6 @@ def run_single_evaluation(
             all_gt.append(gt_dict)
             all_preds.append(pred_dict)
 
-            # Extract matched TP boxes for continuous regression metrics (angle, box offset)
             for c in range(num_classes):
                 gt_boxes = gt_dict[c].get("boxes", np.zeros((0, 5)))
                 p_boxes = pred_dict[c].get("boxes", np.zeros((0, 5)))
@@ -300,7 +340,6 @@ def run_single_evaluation(
         sample_idx = end_idx
         batch_idx += 1
 
-        # Periodically save batch progress
         save_batch_progress(
             results_dir=results_dir,
             run_id=run_id,
@@ -313,28 +352,19 @@ def run_single_evaluation(
             elapsed_seconds=time.time() - start_time,
         )
 
-        # Periodic cleanup if warning pressure exists
         if mem_status["status"] in ("warning", "recovered"):
             deep_cleanup_memory()
 
-    # Clear mid-batch progress once inference is fully complete
     clear_batch_progress(results_dir, run_id, dataset_name, model_name)
 
-    # 1. Detection mAP Metrics
     map_results = compute_map_metrics(all_gt, all_preds, class_names)
-
-    # 2. Multi-class Confusion Matrix with Background
     cm, cm_labels = compute_detection_confusion_matrix(all_gt, all_preds, class_names, iou_threshold=iou_thresh)
-
-    # 3. Classification Metrics (Accuracy, Precision, Recall, F1, Specificity)
     cls_results = compute_classification_metrics(cm, class_names)
 
-    # 4. Continuous Regression & Correlation Metrics
     matched_gt_arr = np.array(matched_gt_boxes) if len(matched_gt_boxes) > 0 else np.zeros((0, 5))
     matched_pred_arr = np.array(matched_pred_boxes) if len(matched_pred_boxes) > 0 else np.zeros((0, 5))
     reg_results = compute_regression_metrics(matched_gt_arr, matched_pred_arr)
 
-    # 5. Latency & FPS Benchmark
     if num_samples > 0:
         sample_img = dataset.get_image(0)
         warmup = 1 if is_test else 2
@@ -343,9 +373,7 @@ def run_single_evaluation(
     else:
         perf_stats = {"mean_latency_ms": 0.0, "p95_latency_ms": 0.0, "fps": 0.0}
 
-    # Final deep cleanup
     deep_cleanup_memory()
-
 
     return {
         "map": map_results,
@@ -359,152 +387,74 @@ def run_single_evaluation(
     }
 
 
-def main():
-    args = parse_args()
-    set_seed(args.seed)
+def run_evaluation_suite(
+    phase_label: str,
+    valid_datasets: List[str],
+    requested_models: List[str],
+    data_dir: Path,
+    weights_dir: Path,
+    results_dir: Path,
+    run_id: str,
+    device: str,
+    args: argparse.Namespace,
+    trained_weights_map: Optional[Dict[Tuple[str, str], str]] = None,
+    plots_dir: Optional[Path] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Execute evaluation across datasets and models for a given phase (pre_train or post_train).
+    """
+    phase_summary_rows = []
+    print(f"\n{'=' * 75}")
+    if phase_label == "pre_train":
+        print(" PHASE 1: PRE-TRAINING BASELINE EVALUATION (ZERO-SHOT / OFF-THE-SHELF)")
+    elif phase_label == "post_train":
+        print(" PHASE 3: POST-TRAINING EVALUATION (FINE-TUNED CHECKPOINTS)")
+    else:
+        print(" EVALUATION SUITE")
+    print(f"{'=' * 75}")
 
-    print("=================================================================")
-    print(" Aerial OBB Detection & Benchmark Evaluation Suite")
-    print("=================================================================")
-
-    dev_info = get_device_info(args.device)
-    device = dev_info["device"]
-    print(f"[*] Hardware Environment : {dev_info['device_name']} (PyTorch device: '{device}')")
-    print(f"[*] Memory State         : {format_memory_summary()}")
-
-    if args.test:
-        print("[*] --test flag activated! Fast CPU test mode with synthetic aerial data.")
-        args.batch_size = min(args.batch_size, 2)
-        if args.max_samples is None:
-            args.max_samples = 4
-
-    run_id = args.run_name or f"run_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    if args.test:
-        run_id += "_test"
-
-    # Setup directories via path resolver (incorporates Google Drive when in Colab)
-    paths = resolve_pipeline_paths(
-        data_dir=args.data_dir if args.data_dir != str(DEFAULT_DATA_DIR) else None,
-        weights_dir=args.weights_dir if args.weights_dir != str(DEFAULT_WEIGHTS_DIR) else None,
-        results_dir=args.results_dir if args.results_dir != str(DEFAULT_RESULTS_DIR) else None,
-        run_id=run_id,
-    )
-
-    data_dir = paths["data_dir"]
-    weights_dir = paths["weights_dir"]
-    results_dir = paths["results_dir"]
-    output_dir = paths["output_dir"]
-
-    if paths["in_colab"]:
-        print("[*] Google Colab Environment Detected.")
-        if paths["drive_mounted"]:
-            print(f"[*] Google Drive Mounted : {get_drive_root()}")
-            print("    Persistent storage is active: weights and results will persist in Google Drive.")
-        else:
-            print("[!] Note: Google Drive is not mounted. For permanent retention, mount drive at /content/drive.")
-
-    plots_dir = output_dir / "plots"
-    if args.save_plots:
-        plots_dir.mkdir(parents=True, exist_ok=True)
-
-    # Resolve datasets and models
-    requested_datasets = SUPPORTED_DATASETS if "all" in args.datasets else [d.lower() for d in args.datasets]
-    requested_models = SUPPORTED_MODELS if "all" in args.models else args.models
-
-    print(f"[*] Datasets to evaluate  : {requested_datasets}")
-    print(f"[*] Models to evaluate    : {requested_models}")
-    print(f"[*] Results Directory     : {output_dir}\n")
-
-    # Step 1: Ensure dataset availability
-    datasets_ready = {}
-    for d_name in requested_datasets:
-        if args.test:
-            print(f"[*] Generating synthetic test dataset for '{d_name}'...")
-            create_mock_dataset(d_name, data_dir, num_train=3, num_val=args.max_samples)
-            datasets_ready[d_name] = True
-        else:
-            status = verify_dataset_status(d_name, data_dir)
-            if not status["ready"]:
-                if args.download:
-                    print(f"[*] Attempting download for '{d_name}'...")
-                    success = download_dataset(d_name, data_dir)
-                    datasets_ready[d_name] = success
-                else:
-                    print(f"[!] Dataset '{d_name}' not found locally at {status['path']}.")
-                    print("    Pass --download to attempt automated retrieval, or follow manual instructions:\n")
-                    print(status["manual_guide"])
-                    datasets_ready[d_name] = False
-            else:
-                datasets_ready[d_name] = True
-
-    valid_datasets = [d for d, ready in datasets_ready.items() if ready]
-    if not valid_datasets:
-        print("[!] No datasets are ready for evaluation. Exiting.", file=sys.stderr)
-        sys.exit(1)
-
-    # Queue evaluation pairs
-    total_pairs = [{"dataset": d, "model": m} for d in valid_datasets for m in requested_models]
-    completed_pairs = []
-    pending_pairs = list(total_pairs)
-    all_summary_rows = []
-
-    # Check for existing run manifest if resuming
-    if args.resume:
-        manifest = load_run_manifest(results_dir, run_id)
-        if manifest:
-            print(f"[*] Existing run manifest detected for '{run_id}'. Resuming previous progress...")
-
-    # Register graceful signal handler to commit run state on SIGINT/SIGTERM
-    def graceful_exit(signum, frame):
-        print(f"\n[!] Signal handler invoked. Flushing partial run manifest to {output_dir}...")
-        save_run_manifest(
-            results_dir=results_dir,
-            run_id=run_id,
-            summary_rows=all_summary_rows,
-            completed_pairs=completed_pairs,
-            pending_pairs=pending_pairs,
-            is_completed=False,
-        )
-
-    setup_signal_handlers(graceful_exit)
-
-    # Step 2: Evaluation Loop
     for d_name in valid_datasets:
-        print(f"\n{'#' * 65}")
-        print(f" Evaluating on Dataset: {d_name.upper()}")
-        print(f"{'#' * 65}")
-
         dataset = AerialOBBDataset(
             dataset_name=d_name,
             data_dir=data_dir,
             split="val",
             max_samples=args.max_samples,
         )
-        print(f"[*] Loaded {len(dataset)} validation images for {d_name}.")
+        print(f"\n[*] Evaluating on Dataset: {d_name.upper()} ({len(dataset)} validation samples)")
 
         for m_name in requested_models:
-            current_pair = {"dataset": d_name, "model": m_name}
-            print(f"\n--> Model: {m_name} on {d_name}")
+            print(f"\n  --> Model: {m_name} on {d_name} [{phase_label}]")
 
-            # Check if this evaluation was already completed
-            if args.resume and is_evaluation_completed(results_dir, run_id, d_name, m_name):
-                print(f"    [CHECKPOINT HIT] Found completed evaluation for {m_name} on {d_name}. Skipping.")
-                cached_ckpt = load_evaluation_checkpoint(results_dir, run_id, d_name, m_name)
+            ckpt_model_key = f"{m_name}_{phase_label}"
+            if args.resume and is_evaluation_completed(results_dir, run_id, d_name, ckpt_model_key):
+                print(f"      [CHECKPOINT HIT] Found completed evaluation for {ckpt_model_key} on {d_name}. Skipping.")
+                cached_ckpt = load_evaluation_checkpoint(results_dir, run_id, d_name, ckpt_model_key)
                 if cached_ckpt and "summary" in cached_ckpt:
-                    all_summary_rows.append(cached_ckpt["summary"])
-                    completed_pairs.append(current_pair)
-                    if current_pair in pending_pairs:
-                        pending_pairs.remove(current_pair)
+                    phase_summary_rows.append(cached_ckpt["summary"])
                     continue
 
+            weights_path = None
+            if phase_label == "post_train":
+                if trained_weights_map and (m_name, d_name) in trained_weights_map:
+                    weights_path = trained_weights_map[(m_name, d_name)]
+                else:
+                    candidate = weights_dir / f"{m_name}_{d_name}_best.pt"
+                    if candidate.exists():
+                        weights_path = str(candidate)
+
             try:
-                model = get_model(m_name, device=device, num_classes=len(dataset.class_names))
-                model.load()
+                model = get_model(
+                    m_name,
+                    device=device,
+                    num_classes=len(dataset.class_names),
+                    weights_path=weights_path,
+                )
+                if not weights_path:
+                    model.load()
             except Exception as e:
                 print(f"[!] Could not load model '{m_name}': {e}", file=sys.stderr)
                 continue
 
-            # Run evaluation
             eval_out = run_single_evaluation(
                 model=model,
                 dataset=dataset,
@@ -519,7 +469,6 @@ def main():
                 is_test=args.test,
             )
 
-
             map_res = eval_out["map"]
             cls_res = eval_out["classification"]
             reg_res = eval_out["regression"]
@@ -528,6 +477,7 @@ def main():
             summary_item = {
                 "model": m_name,
                 "dataset": d_name,
+                "phase": phase_label,
                 "map50": map_res["map50"],
                 "map75": map_res["map75"],
                 "map50_95": map_res["map50_95"],
@@ -550,87 +500,295 @@ def main():
                 "fps": perf_res["fps"],
                 "mean_latency_ms": perf_res["mean_latency_ms"],
             }
-            all_summary_rows.append(summary_item)
-            completed_pairs.append(current_pair)
-            if current_pair in pending_pairs:
-                pending_pairs.remove(current_pair)
+            phase_summary_rows.append(summary_item)
 
             print(
-                f"    [mAP50: {map_res['map50']:.3f} | mAP75: {map_res['map75']:.3f} | F1: {cls_res['macro_f1']:.3f} | "
+                f"      [mAP50: {map_res['map50']:.3f} | mAP75: {map_res['map75']:.3f} | F1: {cls_res['macro_f1']:.3f} | "
                 f"Angle MAE: {reg_res['angle_mae']:.2f}° | Pearson r: {reg_res['angle_pearson_r']:.3f} | "
                 f"R²: {reg_res['angle_r2']:.3f} | FPS: {perf_res['fps']:.1f}]"
             )
 
-            # Persist checkpoint immediately after model-dataset completion
             save_evaluation_checkpoint(
                 results_dir=results_dir,
                 run_id=run_id,
                 dataset_name=d_name,
-                model_name=m_name,
+                model_name=ckpt_model_key,
                 summary_item=summary_item,
                 completed=True,
             )
 
-            # Update master manifest
-            save_run_manifest(
-                results_dir=results_dir,
-                run_id=run_id,
-                summary_rows=all_summary_rows,
-                completed_pairs=completed_pairs,
-                pending_pairs=pending_pairs,
-                is_completed=len(pending_pairs) == 0,
-            )
-
-            # Save visual plots
-            if args.save_plots:
-                cm_plot_path = plots_dir / f"confusion_matrix_{d_name}_{m_name}.png"
+            if args.save_plots and plots_dir:
+                prefix = f"{phase_label}_" if phase_label != "eval" else ""
+                cm_plot_path = plots_dir / f"confusion_matrix_{prefix}{d_name}_{m_name}.png"
                 plot_confusion_matrix(
                     cm=eval_out["confusion_matrix"],
                     class_names=eval_out["confusion_labels"],
                     output_path=cm_plot_path,
-                    title=f"Confusion Matrix: {m_name} on {d_name.upper()}",
+                    title=f"Confusion Matrix: {m_name} on {d_name.upper()} ({phase_label.replace('_', ' ').title()})",
                 )
-
                 if len(eval_out["matched_gt_boxes"]) > 0:
-                    corr_plot_path = plots_dir / f"angle_correlation_{d_name}_{m_name}.png"
+                    corr_plot_path = plots_dir / f"angle_correlation_{prefix}{d_name}_{m_name}.png"
                     plot_angle_correlation(
                         true_angles=eval_out["matched_gt_boxes"][:, 4],
                         pred_angles=eval_out["matched_pred_boxes"][:, 4],
                         output_path=corr_plot_path,
-                        title=f"OBB Angle Correlation: {m_name} on {d_name.upper()}",
+                        title=f"OBB Angle Correlation: {m_name} on {d_name.upper()} ({phase_label.replace('_', ' ').title()})",
                         r2_score=reg_res["angle_r2"],
                         pearson_r=reg_res["angle_pearson_r"],
                         mae=reg_res["angle_mae"],
                     )
 
-            # Clean memory before loading next model
             deep_cleanup_memory()
 
-    if not all_summary_rows:
-        print("[!] No evaluations completed.", file=sys.stderr)
+    return phase_summary_rows
+
+
+def run_training_suite(
+    valid_datasets: List[str],
+    requested_models: List[str],
+    data_dir: Path,
+    weights_dir: Path,
+    device: str,
+    args: argparse.Namespace,
+) -> Dict[Tuple[str, str], str]:
+    """
+    Execute GPU-accelerated training across all requested dataset and model combinations.
+    """
+    trained_weights = {}
+    print(f"\n{'=' * 75}")
+    print(" PHASE 2: GPU TRAINING & FINE-TUNING SUITE")
+    print(f"{'=' * 75}")
+
+    train_epochs = 1 if args.test else args.epochs
+    train_batch = min(args.train_batch_size, 2) if args.test else args.train_batch_size
+    train_workers = 0 if args.test or device == "cpu" else args.train_workers
+    train_imgsz = 160 if args.test else args.imgsz
+
+    for d_name in valid_datasets:
+        for m_name in requested_models:
+            print(f"\n>>> [Job Start] Training '{m_name}' on '{d_name.upper()}' ({train_epochs} Epochs) <<<")
+            try:
+                if "yolo" in m_name:
+                    res = train_yolo_obb(
+                        model_name=m_name,
+                        dataset_name=d_name,
+                        epochs=train_epochs,
+                        batch_size=train_batch,
+                        imgsz=train_imgsz,
+                        device=device,
+                        workers=train_workers,
+                        resume=args.resume,
+                        project_dir=str(weights_dir),
+                        data_dir=str(data_dir),
+                    )
+                else:
+                    res = train_custom_detector(
+                        dataset_name=d_name,
+                        epochs=train_epochs,
+                        batch_size=train_batch,
+                        img_size=train_imgsz,
+                        device=device,
+                        workers=train_workers,
+                        resume=args.resume,
+                        project_dir=str(weights_dir),
+                        data_dir=str(data_dir),
+                    )
+                trained_weights[(m_name, d_name)] = res["best_weights"]
+                print(f"[✓] Checkpoint saved: {res['best_weights']}")
+            except Exception as e:
+                print(f"[!] Training error for {m_name} on {d_name}: {e}", file=sys.stderr)
+
+    return trained_weights
+
+
+def main():
+    args = parse_args()
+    set_seed(args.seed)
+
+    print("=================================================================")
+    print(" Aerial OBB Detection, Training & Benchmark Suite")
+    print("=================================================================")
+
+    dev_info = get_device_info(args.device)
+    device = dev_info["device"]
+    print(f"[*] Hardware Environment : {dev_info['device_name']} (PyTorch device: '{device}')")
+    print(f"[*] Memory State         : {format_memory_summary()}")
+    print(f"[*] Execution Mode       : '{args.mode.upper()}'")
+
+    if args.test:
+        print("[*] --test flag activated! Fast CPU test mode with synthetic aerial data.")
+        args.batch_size = min(args.batch_size, 2)
+        if args.max_samples is None:
+            args.max_samples = 4
+
+    run_id = args.run_name or f"run_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    if args.test:
+        run_id += "_test"
+
+    paths = resolve_pipeline_paths(
+        data_dir=args.data_dir if args.data_dir != str(DEFAULT_DATA_DIR) else None,
+        weights_dir=args.weights_dir if args.weights_dir != str(DEFAULT_WEIGHTS_DIR) else None,
+        results_dir=args.results_dir if args.results_dir != str(DEFAULT_RESULTS_DIR) else None,
+        run_id=run_id,
+    )
+
+    data_dir = paths["data_dir"]
+    weights_dir = paths["weights_dir"]
+    results_dir = paths["results_dir"]
+    output_dir = paths["output_dir"]
+
+    if paths["in_colab"]:
+        print("[*] Google Colab Environment Detected.")
+        if paths["drive_mounted"]:
+            print(f"[*] Google Drive Mounted : {get_drive_root()}")
+            print("    Persistent storage active: weights and results will persist in Google Drive.")
+        else:
+            print("[!] Note: Google Drive is not mounted. For permanent retention, mount drive at /content/drive.")
+
+    plots_dir = output_dir / "plots"
+    if args.save_plots:
+        plots_dir.mkdir(parents=True, exist_ok=True)
+
+    requested_datasets = SUPPORTED_DATASETS if "all" in args.datasets else [d.lower() for d in args.datasets]
+    requested_models = [m for m in SUPPORTED_MODELS if m != "yolov8s-obb"] if "all" in args.models else args.models
+
+    print(f"[*] Datasets : {requested_datasets}")
+    print(f"[*] Models   : {requested_models}")
+    print(f"[*] Results  : {output_dir}\n")
+
+    # Step 1: Ensure dataset availability
+    datasets_ready = {}
+    for d_name in requested_datasets:
+        if args.test:
+            print(f"[*] Generating synthetic test dataset for '{d_name}'...")
+            create_mock_dataset(d_name, data_dir, num_train=4, num_val=args.max_samples)
+            datasets_ready[d_name] = True
+        else:
+            status = verify_dataset_status(d_name, data_dir)
+            if not status["ready"]:
+                if args.download:
+                    print(f"[*] Attempting download for '{d_name}'...")
+                    success = download_dataset(d_name, data_dir)
+                    datasets_ready[d_name] = success
+                else:
+                    print(f"[!] Dataset '{d_name}' not found locally at {status['path']}.")
+                    print("    Pass --download to attempt automated retrieval, or follow manual instructions:\n")
+                    print(status["manual_guide"])
+                    datasets_ready[d_name] = False
+            else:
+                datasets_ready[d_name] = True
+
+    valid_datasets = [d for d, ready in datasets_ready.items() if ready]
+    if not valid_datasets:
+        print("[!] No datasets are ready for evaluation. Exiting.", file=sys.stderr)
         sys.exit(1)
 
-    # Save summary table CSV and JSON atomically
-    df_summary = pd.DataFrame(all_summary_rows)
+    pre_results = []
+    post_results = []
+    trained_weights = {}
+
+    # Signal handler for graceful checkpoint saving
+    def graceful_exit(signum, frame):
+        print(f"\n[!] Interruption signal caught. Flushing run manifest to {output_dir}...")
+        all_rows = pre_results + post_results
+        save_run_manifest(
+            results_dir=results_dir,
+            run_id=run_id,
+            summary_rows=all_rows,
+            completed_pairs=[],
+            pending_pairs=[],
+            is_completed=False,
+        )
+
+    setup_signal_handlers(graceful_exit)
+
+    # -------------------------------------------------------------
+    # EXECUTION PHASES ACCORDING TO --mode
+    # -------------------------------------------------------------
+
+    # Phase 1: Pre-Training Baseline Evaluation (only in full mode)
+    if args.mode == "full":
+        pre_results = run_evaluation_suite(
+            phase_label="pre_train",
+            valid_datasets=valid_datasets,
+            requested_models=requested_models,
+            data_dir=data_dir,
+            weights_dir=weights_dir,
+            results_dir=results_dir,
+            run_id=run_id,
+            device=device,
+            args=args,
+            plots_dir=plots_dir,
+        )
+        # Save pre-training summary
+        if pre_results:
+            df_pre = pd.DataFrame(pre_results)
+            df_pre.to_csv(output_dir / "pre_train_summary.csv", index=False)
+            atomic_save_json(pre_results, output_dir / "pre_train_metrics.json")
+
+    # Phase 2: GPU Training (in full or train mode)
+    if args.mode in ("full", "train"):
+        trained_weights = run_training_suite(
+            valid_datasets=valid_datasets,
+            requested_models=requested_models,
+            data_dir=data_dir,
+            weights_dir=weights_dir,
+            device=device,
+            args=args,
+        )
+
+    # Phase 3: Post-Training Evaluation (in full or eval mode)
+    if args.mode in ("full", "eval"):
+        eval_phase = "post_train" if args.mode == "full" else "eval"
+        post_results = run_evaluation_suite(
+            phase_label=eval_phase,
+            valid_datasets=valid_datasets,
+            requested_models=requested_models,
+            data_dir=data_dir,
+            weights_dir=weights_dir,
+            results_dir=results_dir,
+            run_id=run_id,
+            device=device,
+            args=args,
+            trained_weights_map=trained_weights,
+            plots_dir=plots_dir,
+        )
+
+    # Phase 4: Comparative Reporting & Synthesis
+    final_results = post_results if post_results else pre_results
+    if not final_results:
+        print("[!] No evaluations were performed in this run.")
+        return
+
+    # Save CSV and JSON
+    df_final = pd.DataFrame(final_results)
     csv_path = output_dir / "benchmark_summary.csv"
-    tmp_csv = csv_path.with_name(f"{csv_path.name}.tmp")
-    df_summary.to_csv(tmp_csv, index=False)
-    os.replace(tmp_csv, csv_path)
+    df_final.to_csv(csv_path, index=False)
+    if post_results:
+        df_final.to_csv(output_dir / "post_train_summary.csv", index=False)
+    atomic_save_json(final_results, output_dir / "benchmark_metrics.json")
 
-    atomic_save_json(all_summary_rows, output_dir / "benchmark_metrics.json")
-
-    # Identify best model and dataset
-    best_row_map50 = df_summary.loc[df_summary["map50"].idxmax()]
+    # Identify best performing model
+    best_row_map50 = df_final.loc[df_final["map50"].idxmax()]
     best_model = best_row_map50["model"]
     best_dataset = best_row_map50["dataset"]
 
-    # Save comparative bar chart
+    # Comparative charts
     if args.save_plots:
         comparison_chart_path = plots_dir / "model_benchmark_comparison.png"
-        plot_benchmark_comparison(all_summary_rows, comparison_chart_path)
+        plot_benchmark_comparison(final_results, comparison_chart_path)
 
-    # Generate Markdown Report atomically
-    md_report = generate_markdown_report(all_summary_rows, best_model=best_model, best_dataset=best_dataset)
+        if pre_results and post_results:
+            pre_post_chart_path = plots_dir / "pre_vs_post_comparison.png"
+            plot_pre_post_comparison(pre_results, post_results, pre_post_chart_path)
+
+    # Markdown Report
+    md_report = generate_markdown_report(
+        results=final_results,
+        best_model=best_model,
+        best_dataset=best_dataset,
+        pre_results=pre_results if pre_results else None,
+    )
     report_path = output_dir / "benchmark_report.md"
     tmp_report = report_path.with_name(f"{report_path.name}.tmp")
     with open(tmp_report, "w", encoding="utf-8") as f:
@@ -639,29 +797,40 @@ def main():
         os.fsync(f.fileno())
     os.replace(tmp_report, report_path)
 
-    # Update manifest to completed state
+    # Final manifest
     save_run_manifest(
         results_dir=results_dir,
         run_id=run_id,
-        summary_rows=all_summary_rows,
-        completed_pairs=completed_pairs,
+        summary_rows=pre_results + post_results,
+        completed_pairs=[],
         pending_pairs=[],
         is_completed=True,
     )
 
-    # Print Final Summary Table to Terminal
+    # Print Terminal Summaries
+    if pre_results and post_results:
+        print("\n" + "=" * 80)
+        print(" PRE-TRAINING VS POST-TRAINING EMPIRICAL PROGRESSION (DELTAS)")
+        print("=" * 80)
+        print(format_delta_table(pre_results, post_results))
+        print("=" * 80)
+
     print("\n" + "=" * 80)
-    print(" FINAL BENCHMARK SUMMARY")
+    print(f" FINAL {'POST-TRAIN ' if post_results else ''}BENCHMARK SUMMARY")
     print("=" * 80)
-    print(format_metrics_table(all_summary_rows))
+    print(format_metrics_table(final_results))
     print("=" * 80)
-    print(f"\n[✓] Results, checkpoints, and plots successfully saved to: {output_dir}")
-    print(f"    - CSV Summary      : {csv_path}")
-    print(f"    - JSON Metrics     : {output_dir / 'benchmark_metrics.json'}")
-    print(f"    - Markdown Report  : {report_path}")
-    print(f"    - Master Manifest  : {output_dir / 'run_manifest.json'}")
+
+    print(f"\n[✓] Results, checkpoints, and reports saved to: {output_dir}")
+    print(f"    - Benchmark Summary CSV : {csv_path}")
+    if pre_results:
+        print(f"    - Pre-Train Summary CSV : {output_dir / 'pre_train_summary.csv'}")
+    if post_results:
+        print(f"    - Post-Train Summary CSV: {output_dir / 'post_train_summary.csv'}")
+    print(f"    - Markdown Full Report  : {report_path}")
+    print(f"    - Metrics JSON          : {output_dir / 'benchmark_metrics.json'}")
     if args.save_plots:
-        print(f"    - Visual Plots Dir : {plots_dir}")
+        print(f"    - Visual Plots Dir      : {plots_dir}")
 
 
 if __name__ == "__main__":

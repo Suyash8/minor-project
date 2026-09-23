@@ -21,6 +21,7 @@ credentials.json
 
 # Temporary & single-use scratch files (root level only)
 /scratch/
+/results/
 *.tmp
 *.tmp.*
 *.log

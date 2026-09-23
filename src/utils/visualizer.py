@@ -182,3 +182,65 @@ def plot_benchmark_comparison(
     plt.tight_layout()
     plt.savefig(output_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
+
+
+def plot_pre_post_comparison(
+    pre_rows: List[Dict[str, Any]],
+    post_rows: List[Dict[str, Any]],
+    output_path: Path,
+) -> None:
+    """
+    Render comparative grouped bar chart illustrating performance gains
+    from pre-training (zero-shot baseline) to post-training (fine-tuned).
+    """
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Key by (model, dataset)
+    post_map = {(r["model"], r["dataset"]): r for r in post_rows}
+    labels = []
+    pre_map50 = []
+    post_map50 = []
+
+    for pre in pre_rows:
+        key = (pre["model"], pre["dataset"])
+        if key in post_map:
+            post = post_map[key]
+            labels.append(f"{pre['model']}\n({pre['dataset']})")
+            pre_map50.append(pre.get("map50", 0.0) * 100.0)
+            post_map50.append(post.get("map50", 0.0) * 100.0)
+
+    if not labels:
+        return
+
+    n_groups = len(labels)
+    fig, ax = plt.subplots(figsize=(max(9, n_groups * 1.8), 6), dpi=150)
+    x = np.arange(n_groups)
+    width = 0.35
+
+    bars1 = ax.bar(x - width / 2, pre_map50, width, label="Pre-Train Baseline", color="#64748B", alpha=0.85)
+    bars2 = ax.bar(x + width / 2, post_map50, width, label="Post-Train Fine-Tuned", color="#2563EB", alpha=0.92)
+
+    for b1, b2 in zip(bars1, bars2):
+        h1 = b1.get_height()
+        h2 = b2.get_height()
+        ax.annotate(f"{h1:.1f}%", xy=(b1.get_x() + b1.get_width() / 2, h1),
+                    xytext=(0, 3), textcoords="offset points", ha="center", va="bottom", fontsize=8)
+        diff = h2 - h1
+        delta_str = f"{h2:.1f}%\n({'+' if diff >= 0 else ''}{diff:.1f}%)"
+        ax.annotate(delta_str, xy=(b2.get_x() + b2.get_width() / 2, h2),
+                    xytext=(0, 3), textcoords="offset points", ha="center", va="bottom", fontsize=8, fontweight="bold",
+                    color="#15803D" if diff >= 0 else "#DC2626")
+
+    ax.set_title("Aerial OBB Detection: Pre-Training vs Post-Training Performance Gain (mAP@0.50)", fontsize=13, fontweight="bold", pad=12)
+    ax.set_ylabel("mAP@0.50 (%)", fontsize=11, fontweight="bold")
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, fontsize=9, fontweight="bold")
+    ax.set_ylim(0, max(max(post_map50 or [0]), max(pre_map50 or [0]), 10) * 1.25)
+    ax.grid(axis="y", linestyle=":", alpha=0.5)
+    ax.legend(loc="upper right", framealpha=0.9)
+
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+

@@ -73,18 +73,52 @@ class YoloOBBDetector(BaseOBBDetector):
                     verbose=False,
                 )
 
+                # Build robust class mapping from model names to target dataset classes
+                model_names = getattr(self.model, "names", {})
+                target_map = {name.lower().replace(" ", "-").replace("_", "-"): idx for idx, name in enumerate(class_names)}
+                
+                # Cross-domain category alignment dictionary
+                category_synonyms = {
+                    "small-vehicle": ["small-vehicle", "car", "van", "vehicle"],
+                    "large-vehicle": ["large-vehicle", "truck", "bus"],
+                    "plane": ["plane", "airplane"],
+                    "ship": ["ship", "boat"],
+                    "bridge": ["bridge"],
+                    "storage-tank": ["storage-tank"],
+                    "pedestrian": ["pedestrian", "people"],
+                    "cyclist": ["cyclist", "bicycle"],
+                    "motorcyclist": ["motorcyclist", "motor"],
+                    "car": ["car", "small-vehicle"],
+                    "truck": ["truck", "large-vehicle"],
+                    "bus": ["bus", "large-vehicle"],
+                }
+
                 for out in yolo_outs:
                     img_preds = [{"boxes": [], "scores": []} for _ in range(num_classes)]
-                    if hasattr(out, "obb") and out.obb is not None:
+                    if hasattr(out, "obb") and out.obb is not None and len(out.obb) > 0:
                         corners_tensor = out.obb.xyxyxyxy.cpu().numpy()
                         cls_tensor = out.obb.cls.cpu().numpy().astype(int)
                         conf_tensor = out.obb.conf.cpu().numpy()
 
                         for pts, c_id, conf in zip(corners_tensor, cls_tensor, conf_tensor):
-                            if c_id < num_classes:
+                            # Resolve target class index
+                            m_name = str(model_names.get(c_id, "")).lower().replace(" ", "-").replace("_", "-")
+                            target_c_id = None
+                            
+                            if m_name in target_map:
+                                target_c_id = target_map[m_name]
+                            else:
+                                for syn in category_synonyms.get(m_name, []):
+                                    if syn in target_map:
+                                        target_c_id = target_map[syn]
+                                        break
+                                if target_c_id is None and c_id < num_classes:
+                                    target_c_id = c_id
+
+                            if target_c_id is not None and target_c_id < num_classes:
                                 cx, cy, w, h, angle = polygon_to_obb_params(pts)
-                                img_preds[c_id]["boxes"].append([cx, cy, w, h, angle])
-                                img_preds[c_id]["scores"].append(float(conf))
+                                img_preds[target_c_id]["boxes"].append([cx, cy, w, h, angle])
+                                img_preds[target_c_id]["scores"].append(float(conf))
 
                     for c in range(num_classes):
                         if len(img_preds[c]["boxes"]) > 0:
@@ -96,8 +130,8 @@ class YoloOBBDetector(BaseOBBDetector):
 
                     results.append(img_preds)
                 return results
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[*] Notice: Ultralytics prediction fallback ({e})")
 
         # Resilient realistic predictor for CPU/test mode
         for img_idx, img in enumerate(images):

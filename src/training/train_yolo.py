@@ -80,8 +80,16 @@ def train_yolo_obb(
         print(f"[*] Found previous checkpoint at: {last_pt}. Resuming training seamlessly...")
         model = YOLO(str(last_pt))
     else:
-        init_weights = pretrained_weights or f"{model_name}.pt"
+        init_weights = pretrained_weights
+        if not init_weights:
+            candidate_weights = weights_dir / f"{model_name}.pt"
+            if candidate_weights.exists():
+                init_weights = str(candidate_weights)
+            else:
+                init_weights = f"{model_name}.pt"
         print(f"[*] Initializing model with base weights: {init_weights}")
+        model = YOLO(init_weights)
+
     # 4. Configure Precision (BF16 for Ampere/Hopper like A100/L4, FP16 for Turing like T4)
     use_bf16 = False
     use_half = False
@@ -124,7 +132,7 @@ def train_yolo_obb(
     final_last = save_dir / "weights" / "last.pt"
 
     target_best = weights_dir / f"{model_name}_{dataset_name}_best.pt"
-    if final_best.exists():
+    if final_best.exists() and final_best.resolve() != target_best.resolve():
         shutil.copy2(final_best, target_best)
         print(f"[✓] Saved best model checkpoint to: {target_best}")
 
@@ -133,8 +141,10 @@ def train_yolo_obb(
         drive_weights = get_drive_root() / "weights"
         drive_weights.mkdir(parents=True, exist_ok=True)
         if target_best.exists():
-            shutil.copy2(target_best, drive_weights / target_best.name)
-            print(f"[✓] Mirrored checkpoint to Google Drive: {drive_weights / target_best.name}")
+            dest = drive_weights / target_best.name
+            if target_best.resolve() != dest.resolve():
+                shutil.copy2(target_best, dest)
+                print(f"[✓] Mirrored checkpoint to Google Drive: {dest}")
 
     return {
         "model_name": model_name,

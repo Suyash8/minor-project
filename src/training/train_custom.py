@@ -330,11 +330,13 @@ def train_custom_detector(
             torch.save(checkpoint_data, best_pt)
             print(f"    [★] New best validation loss: {best_loss:.4f}! Saved {best_pt.name}")
 
-            # Mirror to Drive if active
+            # Mirror to Drive if active and not already on Drive
             if is_drive_mounted():
                 drive_weights = get_drive_root() / "weights"
                 drive_weights.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(best_pt, drive_weights / best_pt.name)
+                dest = drive_weights / best_pt.name
+                if best_pt.resolve() != dest.resolve():
+                    shutil.copy2(best_pt, dest)
 
     total_min = (time.time() - total_start) / 60.0
     print(f"\n[✓] Custom OBB Training finished in {total_min:.2f} minutes. Best Val Loss: {best_loss:.4f}")

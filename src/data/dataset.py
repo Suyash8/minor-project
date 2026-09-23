@@ -65,30 +65,58 @@ class AerialOBBDataset:
         self._discover_samples(max_samples)
 
     def _discover_samples(self, max_samples: Optional[int] = None) -> None:
-        """Find image and label file pairs."""
-        img_dir = self.data_dir / "images" / self.split
-        lbl_dir = self.data_dir / "labels" / self.split
+        """Find image and label file pairs across all supported directory conventions."""
+        candidate_img_dirs = [
+            self.data_dir / "images" / self.split,
+            self.data_dir / self.split / "images",
+            self.data_dir / f"VisDrone2019-DET-{self.split}" / "images",
+            self.data_dir / f"VisDrone2019-DET-{self.split}",
+            self.data_dir / "yolo_obb" / "images" / self.split,
+            self.data_dir / self.split,
+        ]
 
-        if not img_dir.exists():
-            # Fallback search
-            img_dir = self.data_dir / self.split / "images"
-            lbl_dir = self.data_dir / self.split / "labels"
-        if not img_dir.exists():
-            img_dir = self.data_dir / self.split
-            lbl_dir = self.data_dir / self.split
+        # Find the directory with the most valid images
+        best_img_dir = None
+        best_imgs = []
+        for d in candidate_img_dirs:
+            if d.exists() and d.is_dir():
+                imgs = [p for p in d.iterdir() if p.is_file() and p.suffix.lower() in (".jpg", ".jpeg", ".png", ".bmp")]
+                if len(imgs) > len(best_imgs):
+                    best_imgs = imgs
+                    best_img_dir = d
 
-        if not img_dir.exists():
+        if not best_img_dir or not best_imgs:
             return
 
-        all_imgs = sorted(list(img_dir.glob("*.jpg")) + list(img_dir.glob("*.png")))
+        all_imgs = sorted(best_imgs)
         if max_samples:
             all_imgs = all_imgs[:max_samples]
 
+        # Candidate label directories to search for matching labels
+        candidate_lbl_dirs = [
+            self.data_dir / "labels" / self.split,
+            self.data_dir / self.split / "labels",
+            self.data_dir / self.split / "annfile",
+            self.data_dir / self.split / "xml_labels",
+            self.data_dir / f"VisDrone2019-DET-{self.split}" / "annotations",
+            self.data_dir / f"VisDrone2019-DET-{self.split}" / "labels",
+            self.data_dir / "annotations" / self.split,
+            self.data_dir / "yolo_obb" / "labels" / self.split,
+            self.data_dir / self.split,
+        ]
+        valid_lbl_dirs = [d for d in candidate_lbl_dirs if d.exists() and d.is_dir()]
+
         for img_path in all_imgs:
-            lbl_path = lbl_dir / f"{img_path.stem}.txt" if lbl_dir.exists() else None
+            lbl_path = None
+            stem = img_path.stem
+            for ld in valid_lbl_dirs:
+                candidate = ld / f"{stem}.txt"
+                if candidate.exists():
+                    lbl_path = candidate
+                    break
             self.samples.append({
                 "image_path": img_path,
-                "label_path": lbl_path if (lbl_path and lbl_path.exists()) else None,
+                "label_path": lbl_path,
             })
 
     def __len__(self) -> int:

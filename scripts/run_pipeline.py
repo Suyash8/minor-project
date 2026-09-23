@@ -624,10 +624,11 @@ def main():
     print(f"[*] Execution Mode       : '{args.mode.upper()}'")
 
     if args.test:
-        print("[*] --test flag activated! Fast CPU test mode with synthetic aerial data.")
+        print("[*] --test flag activated! Fast test mode.")
         args.batch_size = min(args.batch_size, 2)
         if args.max_samples is None:
             args.max_samples = 4
+            print("[*] Running quick test with --max-samples=4. (Omit --test to evaluate all dataset images).")
 
     run_id = args.run_name or f"run_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
     if args.test:
@@ -667,24 +668,24 @@ def main():
     # Step 1: Ensure dataset availability
     datasets_ready = {}
     for d_name in requested_datasets:
-        if args.test:
-            print(f"[*] Generating synthetic test dataset for '{d_name}'...")
-            create_mock_dataset(d_name, data_dir, num_train=4, num_val=args.max_samples)
+        status = verify_dataset_status(d_name, data_dir)
+        if status["ready"]:
+            print(f"[✓] Dataset '{d_name}' verified locally: {status['num_images']} images found across splits: {status['splits_found']}.")
+            datasets_ready[d_name] = True
+        elif args.test:
+            print(f"[*] Real data not found for '{d_name}'. Generating synthetic test dataset...")
+            create_mock_dataset(d_name, data_dir, num_train=4, num_val=args.max_samples or 4)
             datasets_ready[d_name] = True
         else:
-            status = verify_dataset_status(d_name, data_dir)
-            if not status["ready"]:
-                if args.download:
-                    print(f"[*] Attempting download for '{d_name}'...")
-                    success = download_dataset(d_name, data_dir)
-                    datasets_ready[d_name] = success
-                else:
-                    print(f"[!] Dataset '{d_name}' not found locally at {status['path']}.")
-                    print("    Pass --download to attempt automated retrieval, or follow manual instructions:\n")
-                    print(status["manual_guide"])
-                    datasets_ready[d_name] = False
+            if args.download:
+                print(f"[*] Attempting download for '{d_name}'...")
+                success = download_dataset(d_name, data_dir)
+                datasets_ready[d_name] = success
             else:
-                datasets_ready[d_name] = True
+                print(f"[!] Dataset '{d_name}' not found locally at {status['path']}.")
+                print("    Pass --download to attempt automated retrieval, or follow manual instructions:\n")
+                print(status["manual_guide"])
+                datasets_ready[d_name] = False
 
     valid_datasets = [d for d, ready in datasets_ready.items() if ready]
     if not valid_datasets:

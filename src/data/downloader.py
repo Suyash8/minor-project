@@ -132,19 +132,26 @@ def verify_dataset_status(dataset_name: str, data_dir: Path) -> Dict[str, Any]:
     if not target_dir.exists():
         return status
 
-    # Search for image directories
+    # Search for image directories across all known directory conventions
     for split in ["val", "test", "train"]:
-        img_dir = target_dir / "images" / split
-        if not img_dir.exists():
-            img_dir = target_dir / split / "images"
-        if not img_dir.exists():
-            img_dir = target_dir / split
+        candidates = [
+            target_dir / "images" / split,
+            target_dir / split / "images",
+            target_dir / f"VisDrone2019-DET-{split}" / "images",
+            target_dir / f"VisDrone2019-DET-{split}",
+            target_dir / "yolo_obb" / "images" / split,
+            target_dir / split,
+        ]
+        best_count = 0
+        for cand in candidates:
+            if cand.exists() and cand.is_dir():
+                imgs = [p for p in cand.iterdir() if p.is_file() and p.suffix.lower() in (".jpg", ".jpeg", ".png", ".bmp")]
+                if len(imgs) > best_count:
+                    best_count = len(imgs)
 
-        if img_dir.exists() and img_dir.is_dir():
-            images = list(img_dir.glob("*.jpg")) + list(img_dir.glob("*.png"))
-            if len(images) > 0:
-                status["splits_found"].append(split)
-                status["num_images"] += len(images)
+        if best_count > 0:
+            status["splits_found"].append(split)
+            status["num_images"] += best_count
 
     status["ready"] = status["num_images"] > 0
     return status

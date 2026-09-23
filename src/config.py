@@ -38,9 +38,11 @@ def resolve_pipeline_paths(
     # 1. Resolve DATA_DIR
     if data_dir:
         resolved_data = Path(data_dir).resolve()
-    elif drive_mounted and (drive_dir / "data").exists():
+    elif drive_mounted and (drive_dir / "data").exists() and any((drive_dir / "data").iterdir()):
         resolved_data = (drive_dir / "data").resolve()
-    elif drive_mounted and not (PROJECT_ROOT / "data").exists():
+    elif (PROJECT_ROOT / "data").exists() and any((PROJECT_ROOT / "data").iterdir()):
+        resolved_data = DEFAULT_DATA_DIR.resolve()
+    elif drive_mounted:
         resolved_data = (drive_dir / "data").resolve()
     else:
         resolved_data = DEFAULT_DATA_DIR.resolve()

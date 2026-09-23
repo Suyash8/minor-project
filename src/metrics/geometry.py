@@ -124,10 +124,20 @@ def compute_obb_iou_matrix(gt_boxes: np.ndarray, pred_boxes: np.ndarray) -> np.n
     gt_corners = [obb_to_corners(b[0], b[1], b[2], b[3], b[4]) for b in gt_boxes]
     pred_corners = [obb_to_corners(b[0], b[1], b[2], b[3], b[4]) for b in pred_boxes]
 
+    # Fast vectorized AABB bounding box filter to avoid quadratic Shapely calls
+    gt_mins = np.array([[c[:, 0].min(), c[:, 1].min()] for c in gt_corners], dtype=np.float32)
+    gt_maxs = np.array([[c[:, 0].max(), c[:, 1].max()] for c in gt_corners], dtype=np.float32)
+    pr_mins = np.array([[c[:, 0].min(), c[:, 1].min()] for c in pred_corners], dtype=np.float32)
+    pr_maxs = np.array([[c[:, 0].max(), c[:, 1].max()] for c in pred_corners], dtype=np.float32)
+
+    overlap_x = (gt_maxs[:, 0:1] >= pr_mins[:, 0]) & (gt_mins[:, 0:1] <= pr_maxs[:, 0])
+    overlap_y = (gt_maxs[:, 1:2] >= pr_mins[:, 1]) & (gt_mins[:, 1:2] <= pr_maxs[:, 1])
+    candidate_mask = overlap_x & overlap_y
+
     iou_mat = np.zeros((n_gt, m_pred), dtype=np.float32)
-    for i in range(n_gt):
-        for j in range(m_pred):
-            iou_mat[i, j] = polygon_iou(gt_corners[i], pred_corners[j])
+    cand_i, cand_j = np.where(candidate_mask)
+    for i, j in zip(cand_i, cand_j):
+        iou_mat[i, j] = polygon_iou(gt_corners[i], pred_corners[j])
 
     return iou_mat
 

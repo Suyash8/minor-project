@@ -357,6 +357,18 @@ def run_single_evaluation(
             elapsed_seconds=time.time() - start_time,
         )
 
+        # Real-time progress feedback every ~5% of batches or on first/last batch
+        log_interval = max(1, total_batches // 20)
+        if batch_idx % log_interval == 0 or sample_idx == num_samples or batch_idx == 1:
+            elapsed = time.time() - start_time
+            fps = sample_idx / max(elapsed, 1e-4)
+            pct = (sample_idx / num_samples) * 100.0
+            print(
+                f"      [{model_name}] Progress: {sample_idx}/{num_samples} samples ({pct:.1f}%) | "
+                f"Batch {batch_idx}/{total_batches} | Elapsed: {elapsed:.1f}s | Speed: {fps:.1f} FPS",
+                flush=True,
+            )
+
         if mem_status["status"] in ("warning", "recovered"):
             deep_cleanup_memory()
 
@@ -396,6 +408,7 @@ def run_single_evaluation(
         "performance": perf_stats,
         "matched_gt_boxes": matched_gt_arr,
         "matched_pred_boxes": matched_pred_arr,
+        "total_gt_count": total_gt_count,
     }
 
 
@@ -439,9 +452,14 @@ def run_evaluation_suite(
 
             ckpt_model_key = f"{m_name}_{phase_label}"
             if args.resume and is_evaluation_completed(results_dir, run_id, d_name, ckpt_model_key):
-                print(f"      [CHECKPOINT HIT] Found completed evaluation for {ckpt_model_key} on {d_name}. Skipping.")
                 cached_ckpt = load_evaluation_checkpoint(results_dir, run_id, d_name, ckpt_model_key)
-                if cached_ckpt and "summary" in cached_ckpt:
+                summary_data = cached_ckpt.get("summary", {}) if cached_ckpt else {}
+                cached_gt = summary_data.get("total_gt_boxes", None)
+                # Discard previous checkpoint if it was recorded with 0 annotations when dataset has images
+                if cached_gt is not None and cached_gt == 0 and len(dataset) > 0:
+                    print(f"      [!] Discarding previous checkpoint for {ckpt_model_key} on {d_name} (recorded 0 annotations). Re-evaluating.")
+                elif cached_ckpt and "summary" in cached_ckpt:
+                    print(f"      [CHECKPOINT HIT] Found completed evaluation for {ckpt_model_key} on {d_name}. Skipping.")
                     phase_summary_rows.append(cached_ckpt["summary"])
                     continue
 
@@ -489,6 +507,7 @@ def run_evaluation_suite(
             summary_item = {
                 "model": m_name,
                 "dataset": d_name,
+                "total_gt_boxes": eval_out.get("total_gt_count", 0),
                 "phase": phase_label,
                 "map50": map_res["map50"],
                 "map75": map_res["map75"],

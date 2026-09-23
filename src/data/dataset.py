@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import math
 import sys
+import zipfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
@@ -145,6 +146,36 @@ class AerialOBBDataset:
         # Sort candidate directories with the most valid non-empty files first
         valid_lbl_dirs.sort(key=lambda item: item[1], reverse=True)
         active_lbl_dirs = [item[0] for item in valid_lbl_dirs]
+
+        # Dynamic fallback: if candidate paths had no non-empty labels, scan self.data_dir recursively
+        if len(active_lbl_dirs) == 0 and len(all_imgs) > 0:
+            sample_stems = set(img.stem for img in all_imgs[:10])
+            for p in self.data_dir.rglob("*.txt"):
+                if p.stem in sample_stems and p.stat().st_size > 0:
+                    cand_d = p.parent
+                    if cand_d not in active_lbl_dirs:
+                        active_lbl_dirs.append(cand_d)
+
+            # Auto-extract missing annotations from any present zip archives if needed
+            if len(active_lbl_dirs) == 0:
+                for zip_path in sorted(list(self.data_dir.glob("*.zip")) + list(self.data_dir.parent.glob("*.zip"))):
+                    if self.split in zip_path.name.lower() or self.dataset_name in zip_path.name.lower():
+                        try:
+                            with zipfile.ZipFile(zip_path, "r") as z:
+                                ann_members = [
+                                    m for m in z.namelist()
+                                    if ("annotation" in m.lower() or "annfile" in m.lower() or "label" in m.lower())
+                                    and (m.endswith(".txt") or m.endswith(".xml"))
+                                ]
+                                if ann_members:
+                                    print(f"[*] Auto-extracting missing annotations from {zip_path.name}...")
+                                    z.extractall(self.data_dir, members=ann_members)
+                                    for m in ann_members:
+                                        cand_dir = (self.data_dir / m).parent
+                                        if cand_dir.exists() and cand_dir not in active_lbl_dirs:
+                                            active_lbl_dirs.append(cand_dir)
+                        except Exception:
+                            pass
 
         for img_path in all_imgs:
             lbl_path = None

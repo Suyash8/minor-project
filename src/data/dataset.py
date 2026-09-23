@@ -6,6 +6,8 @@ Parses annotations from YOLO-OBB, DOTA polygon, and VisDrone formats into a stan
 from __future__ import annotations
 
 import math
+import sys
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
 import numpy as np
@@ -127,29 +129,47 @@ class AerialOBBDataset:
             self.data_dir / self.split,
         ])
 
-        # Filter and prioritize directories containing actual .txt annotation files
+        # Filter and prioritize directories containing actual non-empty annotation files
         seen_dirs = set()
         valid_lbl_dirs = []
         for d in candidate_lbl_dirs:
             resolved_d = d.resolve() if d.exists() else None
             if resolved_d and resolved_d.is_dir() and str(resolved_d) not in seen_dirs:
                 seen_dirs.add(str(resolved_d))
-                txt_count = len(list(resolved_d.glob("*.txt")))
-                if txt_count > 0:
-                    valid_lbl_dirs.append((resolved_d, txt_count))
+                txt_count = sum(1 for p in resolved_d.glob("*.txt") if p.is_file() and p.stat().st_size > 0)
+                xml_count = sum(1 for p in resolved_d.glob("*.xml") if p.is_file() and p.stat().st_size > 0)
+                total_valid = txt_count + xml_count
+                if total_valid > 0:
+                    valid_lbl_dirs.append((resolved_d, total_valid))
 
-        # Sort candidate directories with the most .txt files first
+        # Sort candidate directories with the most valid non-empty files first
         valid_lbl_dirs.sort(key=lambda item: item[1], reverse=True)
         active_lbl_dirs = [item[0] for item in valid_lbl_dirs]
 
         for img_path in all_imgs:
             lbl_path = None
             stem = img_path.stem
+            # 1. Prefer non-empty label file
             for ld in active_lbl_dirs:
-                candidate = ld / f"{stem}.txt"
-                if candidate.exists() and candidate.is_file():
-                    lbl_path = candidate
+                for ext in (".txt", ".xml"):
+                    candidate = ld / f"{stem}{ext}"
+                    if candidate.exists() and candidate.is_file() and candidate.stat().st_size > 0:
+                        lbl_path = candidate
+                        break
+                if lbl_path is not None:
                     break
+
+            # 2. Fallback to any matching candidate file
+            if lbl_path is None:
+                for ld in active_lbl_dirs:
+                    for ext in (".txt", ".xml"):
+                        candidate = ld / f"{stem}{ext}"
+                        if candidate.exists() and candidate.is_file():
+                            lbl_path = candidate
+                            break
+                    if lbl_path is not None:
+                        break
+
             self.samples.append({
                 "image_path": img_path,
                 "label_path": lbl_path,
@@ -180,6 +200,76 @@ class AerialOBBDataset:
         lbl_path = self.samples[idx]["label_path"]
         if not lbl_path or not lbl_path.exists():
             return [{"boxes": np.zeros((0, 5), dtype=np.float32)} for _ in range(num_classes)]
+
+        # Handle XML annotations (Pascal VOC / CoDrone robndbox XML)
+        if lbl_path.suffix.lower() == ".xml":
+            try:
+                tree = ET.parse(lbl_path)
+                root = tree.getroot()
+                for obj in root.findall("object"):
+                    name_elem = obj.find("name")
+                    if name_elem is None or not name_elem.text:
+                        continue
+                    raw_cls = name_elem.text.strip().lower()
+                    raw_cls_underscore = raw_cls.replace("-", "_")
+                    raw_cls_hyphen = raw_cls.replace("_", "-")
+                    synonyms = {
+                        "people": "pedestrian",
+                        "motor": "motorcyclist",
+                        "bicycle": "cyclist",
+                        "traffic_signs": "traffic_sign",
+                        "traffic_lights": "traffic_light",
+                        "traffic-signs": "traffic-sign",
+                        "traffic-lights": "traffic-light",
+                    }
+                    norm_cls = synonyms.get(raw_cls, raw_cls)
+                    norm_cls_underscore = synonyms.get(raw_cls_underscore, raw_cls_underscore)
+
+                    cls_idx = None
+                    for candidate in [raw_cls, raw_cls_underscore, raw_cls_hyphen, norm_cls, norm_cls_underscore]:
+                        if candidate in self.class_to_idx:
+                            cls_idx = self.class_to_idx[candidate]
+                            break
+
+                    if cls_idx is None or cls_idx >= num_classes:
+                        continue
+
+                    bnd = obj.find("bndbox")
+                    if bnd is not None:
+                        if bnd.find("x0") is not None:
+                            try:
+                                pts = np.array([
+                                    [float(bnd.find("x0").text), float(bnd.find("y0").text)],
+                                    [float(bnd.find("x1").text), float(bnd.find("y1").text)],
+                                    [float(bnd.find("x2").text), float(bnd.find("y2").text)],
+                                    [float(bnd.find("x3").text), float(bnd.find("y3").text)],
+                                ], dtype=np.float32)
+                                cx, cy, w, h, angle = polygon_to_obb_params(pts)
+                                gt_by_class[cls_idx]["boxes"].append([cx, cy, w, h, angle])
+                            except (ValueError, TypeError, AttributeError):
+                                pass
+                        elif bnd.find("xmin") is not None:
+                            try:
+                                xmin = float(bnd.find("xmin").text)
+                                ymin = float(bnd.find("ymin").text)
+                                xmax = float(bnd.find("xmax").text)
+                                ymax = float(bnd.find("ymax").text)
+                                cx = (xmin + xmax) / 2.0
+                                cy = (ymin + ymax) / 2.0
+                                w = max(xmax - xmin, 1.0)
+                                h = max(ymax - ymin, 1.0)
+                                gt_by_class[cls_idx]["boxes"].append([cx, cy, w, h, 0.0])
+                            except (ValueError, TypeError, AttributeError):
+                                pass
+            except Exception:
+                pass
+
+            for c in range(num_classes):
+                if len(gt_by_class[c]["boxes"]) > 0:
+                    gt_by_class[c]["boxes"] = np.array(gt_by_class[c]["boxes"], dtype=np.float32)
+                else:
+                    gt_by_class[c]["boxes"] = np.zeros((0, 5), dtype=np.float32)
+            return gt_by_class
 
         with open(lbl_path, "r", encoding="utf-8", errors="ignore") as f:
             lines = f.readlines()

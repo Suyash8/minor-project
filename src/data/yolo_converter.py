@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 import numpy as np
@@ -103,9 +104,8 @@ def convert_visdrone_to_yolo_obb(visdrone_dir: Path) -> Path:
             if out_lbl_file.exists() and out_lbl_file.stat().st_size > 0:
                 continue
 
-            ann_file = ann_dir / f"{img_path.stem}.txt" if ann_dir.exists() else None
+            ann_file = ann_dir / f"{img_path.stem}.txt" if ann_dir and ann_dir.exists() else None
             if not ann_file or not ann_file.exists():
-                out_lbl_file.write_text("", encoding="utf-8")
                 continue
 
             try:
@@ -154,10 +154,11 @@ def convert_visdrone_to_yolo_obb(visdrone_dir: Path) -> Path:
                         except (ValueError, IndexError):
                             continue
 
-            lbl_text = "".join(obb_lines)
-            out_lbl_file.write_text(lbl_text, encoding="utf-8")
-            if fallback_lbl_dir != out_lbl_dir and fallback_lbl_dir.exists():
-                (fallback_lbl_dir / f"{img_path.stem}.txt").write_text(lbl_text, encoding="utf-8")
+            if obb_lines:
+                lbl_text = "".join(obb_lines)
+                out_lbl_file.write_text(lbl_text, encoding="utf-8")
+                if fallback_lbl_dir != out_lbl_dir and fallback_lbl_dir.exists():
+                    (fallback_lbl_dir / f"{img_path.stem}.txt").write_text(lbl_text, encoding="utf-8")
 
     # Generate dataset YAML for Ultralytics
     yaml_dict = {
@@ -197,9 +198,8 @@ def convert_dota_to_yolo_obb(dota_dir: Path) -> Path:
             if out_lbl_file.exists() and out_lbl_file.stat().st_size > 0:
                 continue
 
-            lbl_file = lbl_dir / f"{img_path.stem}.txt"
-            if not lbl_file.exists():
-                out_lbl_file.write_text("", encoding="utf-8")
+            lbl_file = lbl_dir / f"{img_path.stem}.txt" if lbl_dir and lbl_dir.exists() else None
+            if not lbl_file or not lbl_file.exists():
                 continue
 
             try:
@@ -240,7 +240,8 @@ def convert_dota_to_yolo_obb(dota_dir: Path) -> Path:
                         except (ValueError, IndexError):
                             continue
 
-            out_lbl_file.write_text("".join(obb_lines), encoding="utf-8")
+            if obb_lines:
+                out_lbl_file.write_text("".join(obb_lines), encoding="utf-8")
 
     yaml_dict = {
         "path": str(dota_dir),
@@ -300,9 +301,17 @@ def convert_codrone_to_yolo_obb(codrone_dir: Path) -> Path:
             if out_lbl_file.exists() and out_lbl_file.stat().st_size > 0:
                 continue
 
-            lbl_file = lbl_dir / f"{img_path.stem}.txt" if lbl_dir.exists() else None
-            if not lbl_file or not lbl_file.exists():
-                out_lbl_file.write_text("", encoding="utf-8")
+            lbl_file = lbl_dir / f"{img_path.stem}.txt" if lbl_dir and lbl_dir.exists() else None
+            xml_file = lbl_dir / f"{img_path.stem}.xml" if lbl_dir and lbl_dir.exists() else None
+            if not xml_file or not xml_file.exists():
+                alt_xml = codrone_dir / split / "xml_labels" / f"{img_path.stem}.xml"
+                if alt_xml.exists():
+                    xml_file = alt_xml
+
+            has_txt = lbl_file is not None and lbl_file.exists() and lbl_file.stat().st_size > 0
+            has_xml = xml_file is not None and xml_file.exists() and xml_file.stat().st_size > 0
+
+            if not has_txt and not has_xml:
                 continue
 
             try:
@@ -312,46 +321,94 @@ def convert_codrone_to_yolo_obb(codrone_dir: Path) -> Path:
                 continue
 
             obb_lines = []
-            with open(lbl_file, "r", encoding="utf-8", errors="ignore") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
+            synonyms = {
+                "motor": "motorcyclist",
+                "people": "pedestrian",
+                "bicycle": "cyclist",
+                "traffic-signs": "traffic_sign",
+                "traffic-lights": "traffic_light",
+            }
 
-                    # Check if already normalized YOLO-OBB: class_id x1 y1 x2 y2 x3 y3 x4 y4
-                    parts_space = line.split()
-                    if len(parts_space) == 9:
-                        try:
-                            c_id = int(parts_space[0])
-                            coords = [float(p) for p in parts_space[1:]]
-                            if all(0.0 <= c <= 1.05 for c in coords) and 0 <= c_id < len(classes):
-                                obb_lines.append(f"{line}\n")
-                                continue
-                        except ValueError:
-                            pass
-
-                    parts = line.split()
-                    if len(parts) >= 9:
-                        try:
-                            pts = np.array([float(p) for p in parts[:8]], dtype=np.float32).reshape(4, 2)
-                            cls_str = parts[8].lower().replace(" ", "-").replace("_", "-")
-                            synonyms = {
-                                "motor": "motorcyclist",
-                                "people": "pedestrian",
-                                "bicycle": "cyclist",
-                                "traffic-signs": "traffic_sign",
-                                "traffic-lights": "traffic_light",
-                            }
-                            cls_str = synonyms.get(cls_str, cls_str)
-                            if cls_str in class_to_idx:
-                                cat_id = class_to_idx[cls_str]
-                                norm_pts = normalize_box_corners(pts, w_img, h_img)
-                                pts_str = " ".join(f"{coord:.6f}" for coord in norm_pts.flatten())
-                                obb_lines.append(f"{cat_id} {pts_str}\n")
-                        except (ValueError, IndexError):
+            if has_txt:
+                with open(lbl_file, "r", encoding="utf-8", errors="ignore") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
                             continue
 
-            out_lbl_file.write_text("".join(obb_lines), encoding="utf-8")
+                        parts_space = line.split()
+                        if len(parts_space) == 9:
+                            try:
+                                c_id = int(parts_space[0])
+                                coords = [float(p) for p in parts_space[1:]]
+                                if all(0.0 <= c <= 1.05 for c in coords) and 0 <= c_id < len(classes):
+                                    obb_lines.append(f"{line}\n")
+                                    continue
+                            except ValueError:
+                                pass
+
+                        parts = line.split()
+                        if len(parts) >= 9:
+                            try:
+                                pts = np.array([float(p) for p in parts[:8]], dtype=np.float32).reshape(4, 2)
+                                cls_str = parts[8].lower().replace(" ", "-").replace("_", "-")
+                                cls_str = synonyms.get(cls_str, cls_str)
+                                if cls_str in class_to_idx:
+                                    cat_id = class_to_idx[cls_str]
+                                    norm_pts = normalize_box_corners(pts, w_img, h_img)
+                                    pts_str = " ".join(f"{coord:.6f}" for coord in norm_pts.flatten())
+                                    obb_lines.append(f"{cat_id} {pts_str}\n")
+                            except (ValueError, IndexError):
+                                continue
+
+            elif has_xml:
+                try:
+                    tree = ET.parse(xml_file)
+                    root = tree.getroot()
+                    for obj in root.findall("object"):
+                        name_el = obj.find("name")
+                        if name_el is None or not name_el.text:
+                            continue
+                        cls_str = name_el.text.strip().lower().replace(" ", "-").replace("_", "-")
+                        cls_str = synonyms.get(cls_str, cls_str)
+                        if cls_str not in class_to_idx:
+                            continue
+                        cat_id = class_to_idx[cls_str]
+
+                        bnd = obj.find("bndbox")
+                        if bnd is not None:
+                            if bnd.find("x0") is not None:
+                                try:
+                                    pts = np.array([
+                                        [float(bnd.find("x0").text), float(bnd.find("y0").text)],
+                                        [float(bnd.find("x1").text), float(bnd.find("y1").text)],
+                                        [float(bnd.find("x2").text), float(bnd.find("y2").text)],
+                                        [float(bnd.find("x3").text), float(bnd.find("y3").text)],
+                                    ], dtype=np.float32)
+                                    norm_pts = normalize_box_corners(pts, w_img, h_img)
+                                    pts_str = " ".join(f"{coord:.6f}" for coord in norm_pts.flatten())
+                                    obb_lines.append(f"{cat_id} {pts_str}\n")
+                                except (ValueError, TypeError, AttributeError):
+                                    pass
+                            elif bnd.find("xmin") is not None:
+                                try:
+                                    xmin = float(bnd.find("xmin").text)
+                                    ymin = float(bnd.find("ymin").text)
+                                    xmax = float(bnd.find("xmax").text)
+                                    ymax = float(bnd.find("ymax").text)
+                                    pts = np.array([
+                                        [xmin, ymin], [xmax, ymin], [xmax, ymax], [xmin, ymax]
+                                    ], dtype=np.float32)
+                                    norm_pts = normalize_box_corners(pts, w_img, h_img)
+                                    pts_str = " ".join(f"{coord:.6f}" for coord in norm_pts.flatten())
+                                    obb_lines.append(f"{cat_id} {pts_str}\n")
+                                except (ValueError, TypeError, AttributeError):
+                                    pass
+                except Exception:
+                    pass
+
+            if obb_lines:
+                out_lbl_file.write_text("".join(obb_lines), encoding="utf-8")
 
     yaml_dict = {
         "path": str(codrone_dir),

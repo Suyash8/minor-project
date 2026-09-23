@@ -61,17 +61,26 @@ def convert_visdrone_to_yolo_obb(visdrone_dir: Path) -> Path:
     out_yaml = visdrone_dir / "visdrone_yolo_obb.yaml"
 
     for split in ["train", "val"]:
-        img_dir = visdrone_dir / "images" / split
-        if not img_dir.exists():
-            img_dir = visdrone_dir / split / "images"
-        if not img_dir.exists():
+        candidate_img_dirs = [
+            visdrone_dir / "images" / split,
+            visdrone_dir / split / "images",
+            visdrone_dir / f"VisDrone2019-DET-{split}" / "images",
+            visdrone_dir / f"VisDrone2019-DET-{split}",
+            visdrone_dir / split,
+        ]
+        img_dir = next((d for d in candidate_img_dirs if d.exists() and d.is_dir()), None)
+        if not img_dir:
             continue
 
-        ann_dir = visdrone_dir / "annotations" / split
-        if not ann_dir.exists():
-            ann_dir = visdrone_dir / split / "annotations"
-        if not ann_dir.exists():
-            ann_dir = visdrone_dir / "labels" / split
+        candidate_ann_dirs = [
+            visdrone_dir / "annotations" / split,
+            visdrone_dir / split / "annotations",
+            visdrone_dir / f"VisDrone2019-DET-{split}" / "annotations",
+            visdrone_dir / f"VisDrone2019-DET-{split}" / "labels",
+            visdrone_dir / "labels" / split,
+            visdrone_dir / split,
+        ]
+        ann_dir = next((d for d in candidate_ann_dirs if d.exists() and d.is_dir()), None)
 
         out_lbl_dir = resolve_ultralytics_label_dir(img_dir)
 
@@ -246,10 +255,23 @@ def convert_codrone_to_yolo_obb(codrone_dir: Path) -> Path:
     out_yaml = codrone_dir / "codrone_yolo_obb.yaml"
 
     for split in ["train", "val"]:
-        img_dir = codrone_dir / "images" / split
-        lbl_dir = codrone_dir / "labels" / split
-        if not img_dir.exists():
+        candidate_img_dirs = [
+            codrone_dir / "images" / split,
+            codrone_dir / split / "images",
+            codrone_dir / split,
+        ]
+        img_dir = next((d for d in candidate_img_dirs if d.exists() and d.is_dir()), None)
+        if not img_dir:
             continue
+
+        candidate_lbl_dirs = [
+            codrone_dir / "labels" / split,
+            codrone_dir / split / "labels",
+            codrone_dir / split / "annfile",
+            codrone_dir / split / "xml_labels",
+            codrone_dir / split,
+        ]
+        lbl_dir = next((d for d in candidate_lbl_dirs if d.exists() and d.is_dir()), None)
 
         out_lbl_dir = resolve_ultralytics_label_dir(img_dir)
 

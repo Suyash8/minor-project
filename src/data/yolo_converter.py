@@ -228,6 +228,20 @@ def convert_dota_to_yolo_obb(dota_dir: Path) -> Path:
 
     out_yaml = dota_dir / "dota_yolo_obb.yaml"
 
+    # Auto-extract bundled annotations if missing
+    lbl_train = dota_dir / "labels" / "train"
+    lbl_val = dota_dir / "labels" / "val"
+    has_train = lbl_train.exists() and any(p.stat().st_size > 0 for p in lbl_train.glob("*.txt"))
+    has_val = lbl_val.exists() and any(p.stat().st_size > 0 for p in lbl_val.glob("*.txt"))
+    if not has_train or not has_val:
+        repo_root = Path(__file__).resolve().parent.parent.parent
+        bundled_zip = repo_root / "assets" / "dota_annotations.zip"
+        if bundled_zip.exists():
+            print(f"[*] Extracting bundled DOTA annotations from {bundled_zip.name} into {dota_dir}...")
+            with zipfile.ZipFile(bundled_zip, "r") as z:
+                z.extractall(dota_dir)
+            print(f"[✓] DOTA annotations extracted successfully.")
+
     for split in ["train", "val"]:
         img_dir = dota_dir / "images" / split
         lbl_dir = dota_dir / "labels" / split
@@ -317,6 +331,20 @@ def convert_codrone_to_yolo_obb(codrone_dir: Path) -> Path:
     class_to_idx = {c: i for i, c in enumerate(classes)}
 
     out_yaml = codrone_dir / "codrone_yolo_obb.yaml"
+
+    # Auto-extract bundled annotations if missing
+    ann_train = codrone_dir / "train" / "annfile"
+    ann_val = codrone_dir / "val" / "annfile"
+    has_train = ann_train.exists() and any(p.stat().st_size > 0 for p in ann_train.glob("*.txt"))
+    has_val = ann_val.exists() and any(p.stat().st_size > 0 for p in ann_val.glob("*.txt"))
+    if not has_train or not has_val:
+        repo_root = Path(__file__).resolve().parent.parent.parent
+        bundled_zip = repo_root / "assets" / "codrone_annotations.zip"
+        if bundled_zip.exists():
+            print(f"[*] Extracting bundled CODrone annotations from {bundled_zip.name} into {codrone_dir}...")
+            with zipfile.ZipFile(bundled_zip, "r") as z:
+                z.extractall(codrone_dir)
+            print(f"[✓] CODrone annotations extracted successfully.")
 
     for split in ["train", "val"]:
         static_p = DATASET_STATIC_PATHS["codrone"].get(split, {})

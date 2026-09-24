@@ -130,6 +130,18 @@ class AerialOBBDataset:
             self.data_dir / self.split,
         ])
 
+        # Also search in repository local data/ directory if self.data_dir points to an external mount (e.g. Google Drive)
+        repo_data_dir = Path(__file__).resolve().parent.parent.parent / "data" / self.dataset_name
+        if repo_data_dir.exists() and repo_data_dir.resolve() != self.data_dir.resolve():
+            candidate_lbl_dirs.extend([
+                repo_data_dir / f"VisDrone2019-DET-{self.split}" / "annotations",
+                repo_data_dir / f"VisDrone2019-DET-{self.split}" / "labels",
+                repo_data_dir / "annotations" / self.split,
+                repo_data_dir / self.split / "annfile",
+                repo_data_dir / "labels" / self.split,
+                repo_data_dir / self.split / "labels",
+            ])
+
         # Filter and prioritize directories containing actual non-empty annotation files
         seen_dirs = set()
         valid_lbl_dirs = []
@@ -155,6 +167,23 @@ class AerialOBBDataset:
                     cand_d = p.parent
                     if cand_d not in active_lbl_dirs:
                         active_lbl_dirs.append(cand_d)
+
+            # Auto-extract bundled annotations from assets/ if available
+            if len(active_lbl_dirs) == 0:
+                repo_root = Path(__file__).resolve().parent.parent.parent
+                bundled_zip = repo_root / "assets" / f"{self.dataset_name}_annotations.zip"
+                if bundled_zip.exists():
+                    print(f"[*] Auto-extracting bundled {self.dataset_name} annotations from {bundled_zip.name} into {self.data_dir}...")
+                    try:
+                        with zipfile.ZipFile(bundled_zip, "r") as z:
+                            z.extractall(self.data_dir)
+                        for d in candidate_lbl_dirs:
+                            if d.exists() and d.is_dir():
+                                if any(p.is_file() and p.stat().st_size > 0 for p in d.glob("*.txt")) or any(p.is_file() and p.stat().st_size > 0 for p in d.glob("*.xml")):
+                                    if d.resolve() not in [p.resolve() for p in active_lbl_dirs]:
+                                        active_lbl_dirs.append(d)
+                    except Exception as e:
+                        print(f"[!] Failed to extract bundled annotations: {e}")
 
             # Auto-extract missing annotations from any present zip archives if needed
             if len(active_lbl_dirs) == 0:

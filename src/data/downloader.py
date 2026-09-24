@@ -23,6 +23,7 @@ DATASET_METADATA: Dict[str, Dict[str, Any]] = {
         "auto_downloadable": True,
         "direct_urls": {
             "val": "https://github.com/ultralytics/assets/releases/download/v0.0.0/VisDrone2019-DET-val.zip",
+            "train": "https://github.com/ultralytics/assets/releases/download/v0.0.0/VisDrone2019-DET-train.zip",
         },
         "manual_guide": "Download VisDrone2019-DET from https://github.com/VisDrone/VisDrone-Dataset",
     },

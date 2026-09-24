@@ -185,7 +185,8 @@ class DETROBBLoss(nn.Module):
         target_classes = torch.full((B, Q), bg_idx, dtype=torch.int64, device=pred_logits.device)
         for b, (q_idx, t_idx) in enumerate(indices):
             if len(q_idx) > 0:
-                target_classes[b, q_idx] = targets[b]["labels"][t_idx].to(pred_logits.device)
+                tgt_lbls = targets[b]["labels"].to(pred_logits.device)
+                target_classes[b, q_idx] = tgt_lbls[t_idx]
 
         cls_loss = F.cross_entropy(pred_logits.view(-1, num_classes_p1), target_classes.view(-1))
 
@@ -202,14 +203,14 @@ class DETROBBLoss(nn.Module):
             m_pred_box = pred_boxes[b, q_idx]
             m_pred_ang = pred_angles[b, q_idx]
 
-            raw_boxes = targets[b]["boxes"][t_idx]
+            raw_boxes = targets[b]["boxes"].to(pred_logits.device)[t_idx]
             tgt_b_norm = torch.zeros_like(m_pred_box)
             tgt_b_norm[:, 0] = raw_boxes[:, 0] / float(img_size)
             tgt_b_norm[:, 1] = raw_boxes[:, 1] / float(img_size)
             tgt_b_norm[:, 2] = raw_boxes[:, 2] / float(img_size)
             tgt_b_norm[:, 3] = raw_boxes[:, 3] / float(img_size)
 
-            tgt_ang_rad = torch.deg2rad(raw_boxes[:, 4:5]).to(m_pred_ang.device)
+            tgt_ang_rad = torch.deg2rad(raw_boxes[:, 4:5])
 
             # Box L1 Loss
             box_l1 = F.smooth_l1_loss(m_pred_box, tgt_b_norm, reduction="sum")

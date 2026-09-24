@@ -197,10 +197,18 @@ def convert_visdrone_to_yolo_obb(visdrone_dir: Path) -> Path:
                 pass
 
     # Generate dataset YAML for Ultralytics
+    train_rel = DATASET_STATIC_PATHS["visdrone"]["train"]["images"]
+    if not (visdrone_dir / train_rel).exists() and (visdrone_dir / "images" / "train").exists():
+        train_rel = "images/train"
+
+    val_rel = DATASET_STATIC_PATHS["visdrone"]["val"]["images"]
+    if not (visdrone_dir / val_rel).exists() and (visdrone_dir / "images" / "val").exists():
+        val_rel = "images/val"
+
     yaml_dict = {
         "path": str(visdrone_dir),
-        "train": DATASET_STATIC_PATHS["visdrone"]["train"]["images"],
-        "val": DATASET_STATIC_PATHS["visdrone"]["val"]["images"],
+        "train": train_rel,
+        "val": val_rel,
         "names": {i: c for i, c in enumerate(classes)},
     }
     with open(out_yaml, "w", encoding="utf-8") as f:
@@ -279,10 +287,18 @@ def convert_dota_to_yolo_obb(dota_dir: Path) -> Path:
             if obb_lines:
                 out_lbl_file.write_text("".join(obb_lines), encoding="utf-8")
 
+    train_rel = DATASET_STATIC_PATHS["dota"]["train"]["images"]
+    if not (dota_dir / train_rel).exists() and (dota_dir / "images" / "train").exists():
+        train_rel = "images/train"
+
+    val_rel = DATASET_STATIC_PATHS["dota"]["val"]["images"]
+    if not (dota_dir / val_rel).exists() and (dota_dir / "images" / "val").exists():
+        val_rel = "images/val"
+
     yaml_dict = {
         "path": str(dota_dir),
-        "train": DATASET_STATIC_PATHS["dota"]["train"]["images"],
-        "val": DATASET_STATIC_PATHS["dota"]["val"]["images"],
+        "train": train_rel,
+        "val": val_rel,
         "names": {i: c for i, c in enumerate(classes)},
     }
     with open(out_yaml, "w", encoding="utf-8") as f:
@@ -446,10 +462,18 @@ def convert_codrone_to_yolo_obb(codrone_dir: Path) -> Path:
             if obb_lines:
                 out_lbl_file.write_text("".join(obb_lines), encoding="utf-8")
 
+    train_rel = DATASET_STATIC_PATHS["codrone"]["train"]["images"]
+    if not (codrone_dir / train_rel).exists() and (codrone_dir / "images" / "train").exists():
+        train_rel = "images/train"
+
+    val_rel = DATASET_STATIC_PATHS["codrone"]["val"]["images"]
+    if not (codrone_dir / val_rel).exists() and (codrone_dir / "images" / "val").exists():
+        val_rel = "images/val"
+
     yaml_dict = {
         "path": str(codrone_dir),
-        "train": DATASET_STATIC_PATHS["codrone"]["train"]["images"],
-        "val": DATASET_STATIC_PATHS["codrone"]["val"]["images"],
+        "train": train_rel,
+        "val": val_rel,
         "names": {i: c for i, c in enumerate(classes)},
     }
     with open(out_yaml, "w", encoding="utf-8") as f:

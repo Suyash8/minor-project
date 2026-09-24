@@ -32,6 +32,7 @@ def train_yolo_obb(
     resume: bool = True,
     project_dir: Optional[str] = None,
     data_dir: Optional[str] = None,
+    **kwargs,
 ) -> Dict[str, Any]:
     """
     Train a YOLO-OBB model on a given dataset with full GPU acceleration and epoch checkpointing.
@@ -85,6 +86,8 @@ def train_yolo_obb(
             candidate_weights = weights_dir / f"{model_name}.pt"
             if candidate_weights.exists():
                 init_weights = str(candidate_weights)
+            elif model_name == "yolo11-obb":
+                init_weights = "yolo11n-obb.pt"
             else:
                 init_weights = f"{model_name}.pt"
         print(f"[*] Initializing model with base weights: {init_weights}")

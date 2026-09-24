@@ -104,8 +104,7 @@ from src.metrics import (
     compute_regression_metrics,
     compute_obb_iou_matrix,
 )
-from src.training.train_yolo import train_yolo_obb
-from src.training.train_custom import train_custom_detector
+from src.training import train_model, train_yolo_obb, train_custom_detector
 
 
 def str2bool(v):
@@ -606,32 +605,20 @@ def run_training_suite(
         for m_name in requested_models:
             print(f"\n>>> [Job Start] Training '{m_name}' on '{d_name.upper()}' ({train_epochs} Epochs) <<<")
             try:
-                if "yolo" in m_name:
-                    res = train_yolo_obb(
-                        model_name=m_name,
-                        dataset_name=d_name,
-                        epochs=train_epochs,
-                        batch_size=train_batch,
-                        imgsz=train_imgsz,
-                        device=device,
-                        workers=train_workers,
-                        cache=getattr(args, "cache", None),
-                        resume=args.resume,
-                        project_dir=str(weights_dir),
-                        data_dir=str(data_dir),
-                    )
-                else:
-                    res = train_custom_detector(
-                        dataset_name=d_name,
-                        epochs=train_epochs,
-                        batch_size=train_batch,
-                        img_size=train_imgsz,
-                        device=device,
-                        workers=train_workers,
-                        resume=args.resume,
-                        project_dir=str(weights_dir),
-                        data_dir=str(data_dir),
-                    )
+                res = train_model(
+                    model_name=m_name,
+                    dataset_name=d_name,
+                    epochs=train_epochs,
+                    batch_size=train_batch,
+                    img_size=train_imgsz,
+                    device=device,
+                    workers=train_workers,
+                    resume=args.resume,
+                    project_dir=str(weights_dir),
+                    data_dir=str(data_dir),
+                    cache=getattr(args, "cache", None),
+                    max_batches=2 if args.test else None,
+                )
                 trained_weights[(m_name, d_name)] = res["best_weights"]
                 print(f"[✓] Checkpoint saved: {res['best_weights']}")
             except Exception as e:

@@ -185,6 +185,17 @@ def download_dataset(dataset_name: str, data_dir: Path, force: bool = False) -> 
     target_dir = Path(data_dir) / d_name
     target_dir.mkdir(parents=True, exist_ok=True)
 
+    # Check if local archives exist in target_dir that need extraction
+    local_zips = list(target_dir.glob("*.zip")) + list(target_dir.glob("*.tar.gz"))
+    if local_zips and not status["ready"]:
+        for z in local_zips:
+            print(f"[*] Found local archive '{z.name}' in {target_dir}. Extracting...")
+            extract_archive(z, target_dir)
+        status = verify_dataset_status(d_name, data_dir)
+        if status["ready"]:
+            print(f"[✓] Successfully unpacked local archives for {d_name} ({status['num_images']} images ready).")
+            return True
+
     if not meta.get("auto_downloadable", False):
         print(f"[*] Dataset '{d_name}' requires manual download due to hosting restrictions (Baidu / Google Drive).")
         print("\n" + "=" * 65)

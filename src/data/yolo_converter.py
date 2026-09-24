@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import zipfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
@@ -61,15 +62,34 @@ def convert_visdrone_to_yolo_obb(visdrone_dir: Path) -> Path:
 
     out_yaml = visdrone_dir / "visdrone_yolo_obb.yaml"
 
+    # Auto-extract bundled annotations if missing
+    train_ann = visdrone_dir / "VisDrone2019-DET-train" / "annotations"
+    val_ann = visdrone_dir / "VisDrone2019-DET-val" / "annotations"
+    has_train = train_ann.exists() and any(p.stat().st_size > 0 for p in train_ann.glob("*.txt"))
+    has_val = val_ann.exists() and any(p.stat().st_size > 0 for p in val_ann.glob("*.txt"))
+    if not has_train or not has_val:
+        repo_root = Path(__file__).resolve().parent.parent.parent
+        bundled_zip = repo_root / "assets" / "visdrone_annotations.zip"
+        if bundled_zip.exists():
+            print(f"[*] Extracting bundled VisDrone annotations from {bundled_zip.name} into {visdrone_dir}...")
+            with zipfile.ZipFile(bundled_zip, "r") as z:
+                z.extractall(visdrone_dir)
+            print(f"[✓] VisDrone annotations extracted successfully.")
+
     for split in ["train", "val"]:
         static_p = DATASET_STATIC_PATHS["visdrone"].get(split, {})
         direct_img = (visdrone_dir / static_p["images"]) if static_p.get("images") else None
         direct_ann = (visdrone_dir / static_p["labels"]) if static_p.get("labels") else None
 
+        img_dir = None
+        ann_dir = None
+
         if direct_img and direct_img.exists() and direct_img.is_dir():
             img_dir = direct_img
-            ann_dir = direct_ann
-        else:
+            if direct_ann and direct_ann.exists() and any(p.stat().st_size > 0 for p in direct_ann.glob("*.txt")):
+                ann_dir = direct_ann
+
+        if not img_dir:
             candidate_img_dirs = [
                 visdrone_dir / "images" / split,
                 visdrone_dir / split / "images",
@@ -81,15 +101,19 @@ def convert_visdrone_to_yolo_obb(visdrone_dir: Path) -> Path:
             if not img_dir:
                 continue
 
+        if not ann_dir:
             candidate_ann_dirs = [
+                visdrone_dir / f"VisDrone2019-DET-{split}" / "annotations",
                 visdrone_dir / "annotations" / split,
                 visdrone_dir / split / "annotations",
-                visdrone_dir / f"VisDrone2019-DET-{split}" / "annotations",
-                visdrone_dir / f"VisDrone2019-DET-{split}" / "labels",
                 visdrone_dir / "labels" / split,
+                visdrone_dir / split / "labels",
                 visdrone_dir / split,
             ]
-            ann_dir = next((d for d in candidate_ann_dirs if d.exists() and d.is_dir()), None)
+            for cand in candidate_ann_dirs:
+                if cand.exists() and cand.is_dir() and any(p.stat().st_size > 0 for p in cand.glob("*.txt")):
+                    ann_dir = cand
+                    break
 
         out_lbl_dir = resolve_ultralytics_label_dir(img_dir)
 
@@ -99,7 +123,12 @@ def convert_visdrone_to_yolo_obb(visdrone_dir: Path) -> Path:
             fallback_lbl_dir.mkdir(parents=True, exist_ok=True)
 
         img_files = sorted(list(img_dir.glob("*.jpg")) + list(img_dir.glob("*.png")))
-        for img_path in img_files:
+        total_imgs = len(img_files)
+
+        for idx, img_path in enumerate(img_files, 1):
+            if idx % 1000 == 0 or idx == total_imgs or idx == 1:
+                print(f"      [VisDrone {split}] Converting: {idx}/{total_imgs} images ({(idx/total_imgs)*100:.1f}%)...", flush=True)
+
             out_lbl_file = out_lbl_dir / f"{img_path.stem}.txt"
             if out_lbl_file.exists() and out_lbl_file.stat().st_size > 0:
                 continue
@@ -159,6 +188,13 @@ def convert_visdrone_to_yolo_obb(visdrone_dir: Path) -> Path:
                 out_lbl_file.write_text(lbl_text, encoding="utf-8")
                 if fallback_lbl_dir != out_lbl_dir and fallback_lbl_dir.exists():
                     (fallback_lbl_dir / f"{img_path.stem}.txt").write_text(lbl_text, encoding="utf-8")
+
+        # Invalidate any stale Ultralytics labels.cache so it indexes the new annotations
+        for cache_f in list(out_lbl_dir.parent.glob("*.cache")) + list(out_lbl_dir.glob("*.cache")):
+            try:
+                cache_f.unlink()
+            except Exception:
+                pass
 
     # Generate dataset YAML for Ultralytics
     yaml_dict = {

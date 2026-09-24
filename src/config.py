@@ -157,6 +157,17 @@ SUPPORTED_MODELS: List[str] = [
     "yolo11l-obb",
     # Custom PyTorch Anchor-Free detector
     "custom-obb",
+    # 10 Key Survey Models (Post-2022, Transformer-Focused)
+    "std",
+    "rvsa",
+    "ars-detr",
+    "oriented-former",
+    "rio-detr",
+    "rhino",
+    "ao2-detr",
+    "swin-obb",
+    "lsknet",
+    "yolo11-obb",
 ]
 
 # Supported datasets

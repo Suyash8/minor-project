@@ -28,6 +28,7 @@ import torch
 from src.config import DEFAULT_WEIGHTS_DIR, resolve_pipeline_paths
 from src.data.yolo_converter import prepare_dataset_for_yolo_training
 from src.utils.env import is_colab, is_drive_mounted, get_drive_root
+from src.utils.system import auto_configure_hardware
 
 
 def train_yolo_obb(
@@ -54,13 +55,21 @@ def train_yolo_obb(
     except ImportError:
         raise ImportError("Ultralytics is required for YOLO training. Run: pip install ultralytics")
 
-    # 1. Resolve Computing Device
+    # 1. Resolve Computing Device & Auto Hardware Tuning
+    hw_config = auto_configure_hardware(
+        device=device,
+        requested_train_batch_size=batch_size,
+        requested_workers=workers,
+    )
     if device == "auto":
-        dev = "0" if torch.cuda.is_available() else "cpu"
+        dev = "0" if hw_config["device"] == "cuda" else "cpu"
     elif device.startswith("cuda"):
         dev = "0"
     else:
         dev = "cpu"
+
+    batch_size = hw_config["train_batch_size"]
+    workers = hw_config["workers"]
 
     print(f"\n{'=' * 70}")
     print(f" Starting GPU Training: {model_name} on {dataset_name.upper()}")

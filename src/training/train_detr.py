@@ -50,6 +50,7 @@ from src.models import get_model
 from src.training.dataset import UnifiedOBBDataset, obb_collate_fn
 from src.utils.checkpoint import atomic_save_json
 from src.utils.env import is_drive_mounted, get_drive_root
+from src.utils.system import auto_configure_hardware, dynamic_tune_batch_size
 
 
 def extract_detr_predictions(
@@ -280,13 +281,21 @@ def train_detr_model(
     """
     Unified training engine for DETR-based Oriented Object Detectors.
     """
-    # 1. Device Selection
+    # 1. Device Selection & Automatic Hardware Sizing
+    hw_config = auto_configure_hardware(
+        device=device,
+        requested_train_batch_size=batch_size,
+        requested_workers=workers,
+    )
     if device == "auto":
-        dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        dev = torch.device("cuda" if hw_config["device"] == "cuda" else "cpu")
     elif device.startswith("cuda"):
         dev = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     else:
         dev = torch.device("cpu")
+
+    actual_batch_size = hw_config["train_batch_size"]
+    actual_workers = hw_config["workers"]
 
     print(f"\n{'=' * 70}")
     print(f" Starting DETR OBB Training: '{model_name}' on {dataset_name.upper()}")
@@ -296,7 +305,9 @@ def train_detr_model(
         gpu_name = torch.cuda.get_device_name(0)
         gpu_mem = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
         print(f"[*] GPU Model        : {gpu_name} ({gpu_mem:.2f} GB VRAM)")
-    print(f"[*] Training Config  : {epochs} Epochs | Batch: {batch_size} | LR: {lr} | Workers: {workers}")
+    print(f"[*] Training Config  : {epochs} Epochs | Batch: {actual_batch_size} (Auto-Tuned) | LR: {lr} | Workers: {actual_workers}")
+    batch_size = actual_batch_size
+    workers = actual_workers
 
     # 2. Datasets and Loaders
     train_raw = AerialOBBDataset(dataset_name=dataset_name, data_dir=data_dir, split="train")

@@ -67,6 +67,8 @@ from src.utils.system import (
     deep_cleanup_memory,
     check_memory_pressure,
     format_memory_summary,
+    auto_configure_hardware,
+    dynamic_tune_batch_size,
 )
 from src.utils.security import (
     safe_path_join,
@@ -169,14 +171,14 @@ def parse_args():
     parser.add_argument(
         "--train-batch-size",
         type=int,
-        default=16,
-        help="Batch size for training. Tuned for GPU VRAM saturation (e.g. 16 or 32 on T4).",
+        default=None,
+        help="Batch size for training. If omitted or None, automatically configured based on GPU VRAM / system RAM.",
     )
     parser.add_argument(
         "--train-workers",
         type=int,
-        default=4,
-        help="DataLoader worker processes for GPU training.",
+        default=None,
+        help="DataLoader worker processes for GPU training. If omitted or None, automatically configured.",
     )
     parser.add_argument(
         "--imgsz",
@@ -221,8 +223,8 @@ def parse_args():
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=8,
-        help="Inference batch size for evaluation.",
+        default=None,
+        help="Inference batch size for evaluation. If omitted or None, automatically configured based on VRAM.",
     )
     parser.add_argument(
         "--device",
@@ -299,6 +301,19 @@ def run_single_evaluation(
     batch_idx = 0
 
     while sample_idx < num_samples:
+        # Dynamic Hardware-Guided Utilization Optimization
+        if not is_test:
+            new_bs, reason = dynamic_tune_batch_size(
+                current_batch_size=current_batch_size,
+                device=device,
+                min_batch_size=1,
+                max_batch_size=32,
+            )
+            if new_bs != current_batch_size:
+                print(f"      [Auto-Tune] {reason} -> Batch Size: {current_batch_size} => {new_bs}")
+                current_batch_size = new_bs
+                total_batches = (num_samples + current_batch_size - 1) // current_batch_size
+
         mem_status = check_memory_pressure(critical_ram_gb=1.0, max_usage_pct=90.0, auto_clean=True)
         if mem_status["should_throttle"] and current_batch_size > 1:
             current_batch_size = max(1, current_batch_size // 2)
@@ -635,9 +650,21 @@ def main():
     print(" Aerial OBB Detection, Training & Benchmark Suite")
     print("=================================================================")
 
-    dev_info = get_device_info(args.device)
-    device = dev_info["device"]
-    print(f"[*] Hardware Environment : {dev_info['device_name']} (PyTorch device: '{device}')")
+    # Automatic Hardware Detection & Optimization
+    hw_config = auto_configure_hardware(
+        device=args.device,
+        requested_train_batch_size=args.train_batch_size,
+        requested_eval_batch_size=args.batch_size,
+        requested_workers=args.train_workers,
+    )
+    device = hw_config["device"]
+    args.train_batch_size = hw_config["train_batch_size"]
+    args.batch_size = hw_config["eval_batch_size"]
+    args.train_workers = hw_config["workers"]
+
+    print(f"[*] Hardware Environment : {hw_config['gpu_name']} (PyTorch device: '{device}')")
+    print(f"[*] Hardware Resources   : {hw_config['cpu_count']} CPU cores | {hw_config['total_ram_gb']} GB RAM | {hw_config['total_vram_gb']} GB VRAM")
+    print(f"[*] Auto-Tuned Config    : Train Batch={args.train_batch_size}, Eval Batch={args.batch_size}, Workers={args.train_workers}, AMP={hw_config['amp_mode']}")
     print(f"[*] Memory State         : {format_memory_summary()}")
     print(f"[*] Execution Mode       : '{args.mode.upper()}'")
 

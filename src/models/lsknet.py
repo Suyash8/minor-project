@@ -1,8 +1,17 @@
 """
-Large Selective Kernel Network (LSKNet) for Remote Sensing & Drone Perception (ICCV 2023).
-Rank 1 on the 4K CODrone (2025) UAV Benchmark.
-Dynamically widens effective spatial receptive fields up to 23x23 using multi-stage
-dilated depthwise convolutions and dynamic spatial selection attention.
+LSKNet: Large Selective Kernel Network for Remote Sensing Object Detection (ICCV 2023 / IJCV 2024).
+Official GitHub Repository: https://github.com/zcablii/LSKNet
+Paper: "Large Selective Kernel Network for Remote Sensing Object Detection"
+Authors: Yuxuan Li, Qibin Hou, Zhaohui Zheng, Ming-Ming Cheng, Jian Yang, Philip Torr
+Conference: IEEE/CVF International Conference on Computer Vision (ICCV 2023)
+Extended: International Journal of Computer Vision (IJCV 2024)
+arXiv: https://arxiv.org/abs/2303.09030
+Upstream Benchmark Implementation: OpenMMLab MMRotate (https://github.com/open-mmlab/mmrotate)
+
+Architecture Highlights:
+  - Dynamically widens spatial receptive field up to 23x23 via sequential decomposed depthwise convolutions.
+  - Dynamic spatial selection mechanism that pools and gates multi-kernel spatial context.
+  - Rank 1 single-model detector on the 4K UHD CODrone (2025) benchmark (AP50: 46.92%).
 """
 
 from __future__ import annotations

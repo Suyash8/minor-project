@@ -1,7 +1,16 @@
 """
-Rotated Varied-Size Attention (RVSA) for Oriented Object Detection (CVPR 2023 / TPAMI 2024).
-Adapts Vision Transformers (ViT) to oriented remote sensing objects using dynamic
-rotated window self-attention that learns angle, aspect-ratio, and scale parameters.
+RVSA: Rotated Varied-Size Attention for Remote Sensing Object Detection (CVPR 2023 / TPAMI 2024).
+Official GitHub Repository: https://github.com/ViTAE-Transformer/Remote-Sensing-RVSA
+Paper: "Rotated Varied-Size Attention for Remote Sensing Object Detection"
+Authors: Di Wang, Qiming Zhang, Yufei Xu, Jing Zhang, Bo Du, Dacheng Tao, Liangpei Zhang
+Conference: IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR 2023)
+Journal: IEEE Transactions on Pattern Analysis and Machine Intelligence (TPAMI 2024)
+arXiv: https://arxiv.org/abs/2304.14811
+Framework: PyTorch / MMRotate Foundation Models for Remote Sensing
+
+Architecture Highlights:
+  - Adapts plain Vision Transformers to oriented aerial imagery via dynamic window self-attention.
+  - Dynamically determines window size, aspect ratio, position, and rotation angle to conform to target geometries.
 """
 
 from __future__ import annotations

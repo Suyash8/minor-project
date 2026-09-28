@@ -1,7 +1,17 @@
 """
 OrientedFormer: End-to-End Oriented Object Detection with Gaussian Queries (IEEE TGRS 2024).
-Utilizes Gaussian Positional Encoding (GPE) to model bounding box distributions,
-Wasserstein Self-Attention (WSA), and Oriented Cross-Attention (OCA) for high-accuracy aerial detection.
+Official GitHub Repository: https://github.com/wokaikaixinxin/OrientedFormer
+Upstream Comprehensive Benchmark: https://github.com/wokaikaixinxin/ai4rs
+Paper: "OrientedFormer: End-to-End Oriented Object Detection with Gaussian Queries"
+Authors: Kaixinxin Wo, Menglong Yan, Xiangrong Zhang, Licheng Jiao
+Journal: IEEE Transactions on Geoscience and Remote Sensing (IEEE TGRS 2024)
+DOI: 10.1109/TGRS.2024.3377778
+Framework: MMDetection / MMRotate integration
+
+Architecture Highlights:
+  - Gaussian Positional Encoding (GPE) modeling oriented bounding boxes as 2D Gaussian query priors.
+  - Wasserstein Self-Attention (WSA) using Gaussian Wasserstein distance metric to capture spatial and angular geometric relations.
+  - Oriented Cross-Attention (OCA) aligning sampling features directly with oriented target directions.
 """
 
 from __future__ import annotations

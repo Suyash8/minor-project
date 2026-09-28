@@ -1,8 +1,15 @@
 """
-Spatial Transform Decoupling (STD) for Oriented Object Detection (AAAI 2024).
-A Vision Transformer (ViT) architecture that decouples bounding box regression into
-separate branches for position (x, y), scale (w, h), and orientation angle (theta),
-guided by Cascaded Activation Masks (CAMs).
+STD: Spatial Transform Decoupling for Oriented Object Detection (AAAI 2024).
+Official GitHub Repository: https://github.com/yuhongtian17/Spatial-Transform-Decoupling
+Paper: "Spatial Transform Decoupling for Oriented Object Detection"
+Authors: Hongtian Yu, Yunjie Tian, Qixiang Ye, Yunfan Liu
+Conference: Proceedings of the Thirty-Eighth AAAI Conference on Artificial Intelligence (AAAI 2024)
+arXiv: https://arxiv.org/abs/2308.12586
+Reference Benchmark Implementation: MMRotate Framework Integration
+
+Architecture Highlights:
+  - Divides oriented bounding box regression into decoupled branches for position (x, y), scale (w, h), and orientation (theta).
+  - Uses Cascaded Activation Masks (CAMs) to modulate ViT self-attention features and prevent mutual interference between translation and rotation.
 """
 
 from __future__ import annotations

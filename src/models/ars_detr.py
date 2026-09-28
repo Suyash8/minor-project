@@ -1,7 +1,16 @@
 """
-Aspect Ratio-Sensitive Detection Transformer (ARS-DETR) for Aerial Oriented Object Detection (IEEE TGRS 2024).
-An end-to-end DETR framework featuring Rotated Deformable Attention that aligns sampling points
-with object orientation angles, combined with Aspect Ratio-aware Circular Smooth Labeling (AR-CSL).
+ARS-DETR: Aspect Ratio-Sensitive Detection Transformer for Aerial Oriented Object Detection (IEEE TGRS 2024).
+Official GitHub Repository: https://github.com/httle/ARS-DETR
+Paper: "ARS-DETR: Aspect Ratio-Sensitive Detection Transformer for Aerial Oriented Object Detection"
+Authors: Chenghao Xiao, Qiangqiang Yuan, Kui Jiang, Xianwei Zheng, Liangpei Zhang
+Journal: IEEE Transactions on Geoscience and Remote Sensing (IEEE TGRS 2024)
+arXiv: https://arxiv.org/abs/2303.04989
+Original Baseline: Deformable DETR adapted for oriented remote sensing
+
+Architecture Highlights:
+  - Rotated Deformable Attention that dynamically aligns cross-attention sampling points with target orientation angles.
+  - Aspect Ratio-aware Circular Smooth Label (AR-CSL) resolving angular boundary discontinuity and aspect-ratio sensitivity.
+  - Aspect-ratio modulated angle loss weighting.
 """
 
 from __future__ import annotations

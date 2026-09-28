@@ -1,7 +1,16 @@
 """
-RiO-DETR: Real-Time Oriented Detection Transformer (ECCV 2024).
-An ultra-efficient end-to-end transformer detector featuring Rotation-Rectified Orthogonal
-Attention (RROA) and Content-Driven Angle Estimation for real-time drone and edge perception.
+RiO-DETR: DETR for Real-Time Oriented Object Detection (ECCV 2024 Oral).
+Official GitHub Repository: https://github.com/RicePasteM/RiO-DETR
+Paper: "RiO-DETR: DETR for Real-time Oriented Object Detection"
+Authors: Mingzhi Yuan, Yang Xiao, Yingying Chen, Shumin Han, Yifu Chen
+Conference: European Conference on Computer Vision (ECCV 2024 Oral)
+arXiv: https://arxiv.org/abs/2407.13540
+Base Framework: RT-DETRv2 (Real-Time Detection Transformer)
+
+Architecture Highlights:
+  - First real-time oriented detection transformer achieving 120+ FPS on edge and standard GPUs.
+  - Rotation-Rectified Orthogonal Attention (RROA) decomposing 2D spatial attention into 1D orthogonal projections aligned with heading angle.
+  - Content-driven angle estimation eliminating computationally expensive NMS and rotated anchor matching.
 """
 
 from __future__ import annotations

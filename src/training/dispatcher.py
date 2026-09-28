@@ -1,9 +1,22 @@
 """
-Master Dispatcher and Routing Suite for Aerial OBB Model Training.
-Routes any requested model to its dedicated training engine:
-  - Ultralytics YOLO Engine -> train_yolo_obb
-  - Hungarian DETR Engine   -> train_detr_model
-  - Dense Grid OBB Engine   -> train_dense_model
+Master Dispatcher and Routing Suite for Aerial OBB Model Training
+==================================================================
+Routes any requested model to its dedicated, academically standard training engine:
+  1. Ultralytics YOLO Engine (`src/training/train_yolo.py`):
+     - YOLOv8-OBB, YOLO11-OBB (Ultralytics)
+  2. Hungarian Set Prediction DETR Engine (`src/training/train_detr.py`):
+     - ARS-DETR (IEEE TGRS 2024 / ICCV 2023)
+     - AO2-DETR (IEEE TCSVT 2023)
+     - RiO-DETR (ECCV 2024 Oral)
+     - RHINO (CVPR 2024 / AI4RS)
+     - OrientedFormer (IEEE TGRS 2024)
+  3. Dense Grid-Based Anchor-Free OBB Engine (`src/training/train_dense.py`):
+     - LSKNet (ICCV 2023 / IJCV 2024)
+     - STD (Spatial Transform Decoupling, AAAI 2024)
+     - RVSA (Remote Sensing RVSA, CVPR 2023 / TPAMI 2024)
+     - Swin-OBB (ICCV 2021 / MMRotate)
+     - Custom-OBB (Rotated FCOS / CenterNet-OBB baseline)
+     - Native YOLO11-OBB (PyTorch dense anchor-free implementation)
 """
 
 from __future__ import annotations

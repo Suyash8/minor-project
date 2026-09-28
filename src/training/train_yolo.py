@@ -1,7 +1,19 @@
 """
-Full GPU-accelerated training engine for Ultralytics YOLO-OBB models (YOLOv8-OBB & YOLO11-OBB).
-Configured for maximum T4 GPU throughput with Tensor Core FP16 AMP, multi-worker parallel data loading,
-per-epoch checkpoints, and Google Drive auto-persistence.
+Ultralytics YOLO-OBB PyTorch Training Engine
+============================================
+Official Reference & Implementation:
+    Ultralytics YOLO Oriented Object Detection Engine
+    Official Repository: https://github.com/ultralytics/ultralytics
+    Documentation: https://docs.ultralytics.com/modes/train/
+
+Supported Models:
+    yolov8n-obb, yolov8s-obb, yolov8m-obb, yolov8l-obb, yolov8x-obb,
+    yolo11n-obb, yolo11s-obb, yolo11m-obb, yolo11l-obb, yolo11x-obb.
+
+Features:
+    - GPU acceleration with Tensor Core FP16 Automatic Mixed Precision (AMP).
+    - Multi-worker parallel data loading with automatic mosaic and affine augmentations.
+    - Continuous validation tracking and automated checkpoint persistence to Google Drive.
 """
 
 from __future__ import annotations

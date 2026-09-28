@@ -1,7 +1,22 @@
 """
-Custom Lightweight PyTorch Oriented Bounding Box Detector Baseline.
-A pure PyTorch single-stage detector with an oriented regression head.
-Runs natively on both CPU and GPU without external compilation dependencies.
+Custom Anchor-Free Oriented Bounding Box Detector Baseline (FCOS-OBB / CenterNet-OBB Style)
+===========================================================================================
+Architectural Paradigm & Literature Reference:
+    Based on the anchor-free single-stage detection principles established in:
+    1. "FCOS: Fully Convolutional One-Stage Object Detection" (ICCV 2019)
+       Authors: Zhi Tian, Chunhua Shen, Hao Chen, Tong He
+       Official Repository: https://github.com/tianzhi0549/FCOS
+    2. "Objects as Points" (CenterNet, 2019)
+       Authors: Xingyi Zhou, Dequan Wang, Philipp Krähenbühl
+       Official Repository: https://github.com/xingyizhou/CenterNet
+    3. MMRotate Anchor-Free Baselines (Rotated FCOS):
+       Reference: https://github.com/open-mmlab/mmrotate/tree/main/configs/rotated_fcos
+
+Design & Formulation:
+    - Pure PyTorch native architecture running on CPU/GPU without CUDA extensions.
+    - Decoupled classification and bounding box regression branches.
+    - Continuous Angle Representation: regresses [sin(2θ), cos(2θ)] or continuous θ with smooth L1/Gaussian loss,
+      eliminating angle boundary discontinuity (Poincare / periodicity issues) common in [0, pi] and [-pi/2, pi/2] schemes.
 """
 
 from __future__ import annotations

@@ -1,7 +1,24 @@
 """
-Swin-Transformer for Oriented Object Detection (Swin-OBB, 2023).
-A hierarchical Vision Transformer using Shifted Window Multi-Head Self-Attention (W-MSA / SW-MSA)
-coupled with a multi-scale Feature Pyramid Network and an oriented bounding box regression head.
+Swin-Transformer for Oriented Object Detection (Swin-OBB)
+=========================================================
+Foundational Paper Reference:
+    "Swin Transformer: Hierarchical Vision Transformer using Shifted Windows"
+    Authors: Ze Liu, Yutong Lin, Yue Cao, Han Hu, Yixuan Wei, Zheng Zhang, Stephen Lin, Baining Guo
+    Venue: IEEE/CVF International Conference on Computer Vision (ICCV), 2021 (Best Paper Award).
+    Official Repository: https://github.com/microsoft/Swin-Transformer
+    Detection Codebase: https://github.com/SwinTransformer/Swin-Transformer-Object-Detection
+
+Aerial & Remote Sensing OBB Standard:
+    Implemented in MMRotate benchmark suite:
+    "MMRotate: A Rotated Object Detection Benchmark using PyTorch"
+    Repository: https://github.com/open-mmlab/mmrotate
+    Configurations: configs/rotated_fcos/rotated_fcos_swin-t_fpn_1x_dota_le90.py
+
+Architecture:
+    1. Hierarchical Shifted Window Self-Attention (W-MSA / SW-MSA): Restricts self-attention computation to local
+       windows while shifting partitions between successive layers for cross-window interactions (linear computational complexity).
+    2. Multi-Scale FPN Integration: Produces multiscale feature representations for multi-scale aerial target detection.
+    3. Continuous Angle Regression Head: Regresses [cx, cy, w, h, sin(2θ), cos(2θ)] with boundary-unconstrained periodic angle representation.
 """
 
 from __future__ import annotations

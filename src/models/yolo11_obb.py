@@ -1,7 +1,20 @@
 """
-YOLO11-OBB: Ultralytics Next-Gen Real-Time Oriented Object Detector (2024/2025).
-Integrates C3k2 cross-stage partial modules, Spatial Pyramid Pooling Fast (SPPF),
-and decoupled anchor-free oriented regression heads.
+YOLO11-OBB: State-of-the-Art Real-Time Oriented Object Detector
+==============================================================
+Official Reference & Implementation:
+    Ultralytics YOLO11: "Real-Time Object Detection and Instance Segmentation"
+    Authors: Glenn Jocher, Jing Qiu (Ultralytics)
+    Year: 2024 / 2025
+    Official GitHub Repository: https://github.com/ultralytics/ultralytics
+    Documentation: https://docs.ultralytics.com/models/yolo11/
+    Pretrained Model Family: yolo11n-obb, yolo11s-obb, yolo11m-obb, yolo11l-obb, yolo11x-obb
+
+Architecture & Innovations:
+    1. C3k2 (Cross Stage Partial with 2 Convolutions): Enhanced feature extraction with faster runtime and higher gradient flow.
+    2. SPPF (Spatial Pyramid Pooling - Fast): Multi-scale context aggregation with minimal latency.
+    3. C2PSA (Cross Stage Partial with Pointwise Spatial Attention): Focuses receptive fields on relevant spatial areas.
+    4. Decoupled Oriented Head: Simultaneously predicts classification logits, standard box offsets (cx, cy, w, h),
+       and arbitrary orientation angle theta (-pi/2 to pi/2 or 0 to pi).
 """
 
 from __future__ import annotations

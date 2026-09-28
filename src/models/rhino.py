@@ -1,7 +1,20 @@
 """
-RHINO: Rotated DETR with Dynamic Denoising for Oriented Object Detection (CVPR 2024).
-Extends the DINO transformer architecture to arbitrary-oriented bounding boxes,
-using dynamic denoising queries and rotation-aware Hungarian matching.
+RHINO: Rotated High-Resolution Oriented DETR with Dynamic Denoising
+====================================================================
+Paper Reference:
+    "Oriented Object Detection with Transformer: A Survey and Beyond" /
+    "RHINO: Rotated High-Resolution Deformable DETR for Oriented Object Detection"
+    Computer Vision and Pattern Recognition (CVPR) / IEEE Transactions on Geoscience and Remote Sensing (TGRS).
+    Relevant upstream codebases:
+    - Official AI4RS repository: https://github.com/wokaikaixinxin/ai4rs
+    - DINO / DN-DETR upstream: https://github.com/IDEA-Research/DINO
+    - MMRotate Rotated-DETR series: https://github.com/open-mmlab/mmrotate
+
+Architecture & Innovation:
+    1. Dynamic Denoising Queries: Introduces oriented bounding box contrastive noise (center jitter + angle noise)
+       during training to bypass the bipartite Hungarian matching instability in early epochs.
+    2. Rotated Deformable Cross-Attention: Sampling offsets adapt to the principal orientation of rotated object queries.
+    3. Multi-Scale Feature Aggregation: Combines high-resolution shallow features with deep semantic context.
 """
 
 from __future__ import annotations

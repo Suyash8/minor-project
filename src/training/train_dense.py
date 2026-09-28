@@ -1,9 +1,27 @@
 """
-GPU-accelerated PyTorch training engine for Dense Grid-Based OBB Detectors.
-Supports: LSKNet, Swin-OBB, STD (Spatial Transform Decoupling), RVSA, Custom-OBB, and Native YOLO11-OBB.
-Features multi-task loss (focal classification, box regression, continuous circular angle loss),
-AdamW optimizer with CosineAnnealingLR, PyTorch AMP mixed precision, multi-worker DataLoader,
-and per-epoch checkpointing with automatic Google Drive persistence.
+Dense Grid-Based Oriented Object Detection (OBB) PyTorch Training Engine
+========================================================================
+Algorithmic & Upstream Framework Provenance:
+    This training engine implements the standard single-stage anchor-free oriented detection
+    training protocol established in top remote-sensing and computer vision literature:
+    1. MMRotate Benchmark Suite: https://github.com/open-mmlab/mmrotate
+       - Rotated FCOS / Rotated ATSS anchor-free training regimes
+    2. LSKNet (ICCV 2023 / IJCV 2024): https://github.com/zcablii/LSKNet
+    3. STD (AAAI 2024): https://github.com/yuhongtian17/Spatial-Transform-Decoupling
+    4. RVSA (CVPR 2023 / TPAMI 2024): https://github.com/ViTAE-Transformer/Remote-Sensing-RVSA
+    5. Swin-OBB (ICCV 2021 / MMRotate): https://github.com/microsoft/Swin-Transformer
+
+Supported Architectures:
+    LSKNet, Swin-OBB, STD, RVSA, Custom-OBB, Native YOLO11-OBB.
+
+Training Formulation & Features:
+    - Multi-Task Composite Loss:
+        * Sigmoid Focal Loss for class imbalance mitigation
+        * Normalized Smooth L1 Loss for center offset (cx, cy) and size (w, h)
+        * Periodic Continuous Angle Loss: L_angle = 1 - cos(2 * (theta_pred - theta_gt))
+    - Optimization: AdamW with decoupled weight decay and CosineAnnealingLR scheduling.
+    - Precision: PyTorch AMP (Automatic Mixed Precision, float16/bfloat16) with GradScaler.
+    - Storage & Checkpointing: Real-time validation mAP tracking with persistent Google Drive sync.
 """
 
 from __future__ import annotations

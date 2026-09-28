@@ -1,6 +1,16 @@
 """
-Ultralytics YOLO-OBB Model Wrapper (YOLOv8-OBB and YOLO11-OBB).
-Provides standardized OBB prediction parsing and robust fallback handling.
+Ultralytics YOLO-OBB Model Wrapper (YOLOv8-OBB and YOLO11-OBB)
+==============================================================
+Official Reference & Upstream Implementation:
+    Ultralytics YOLOv8 / YOLO11 Oriented Object Detection Framework
+    Authors: Glenn Jocher, Ayush Chaurasia, Jing Qiu (Ultralytics)
+    Repository: https://github.com/ultralytics/ultralytics
+    Documentation: https://docs.ultralytics.com/tasks/obb/
+
+Standard Interface:
+    Wraps Ultralytics OBB PyTorch models (yolov8n-obb, yolov8s-obb, yolo11n-obb, etc.)
+    into the unified BaseOBBDetector interface with automatic device allocation,
+    batch prediction, and normalized/pixel coordinate transformation.
 """
 
 from __future__ import annotations

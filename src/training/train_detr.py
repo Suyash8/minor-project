@@ -1,10 +1,31 @@
 """
-GPU-accelerated PyTorch training engine for DETR-Based Oriented Object Detectors.
-Supports: ARS-DETR, AO2-DETR, RiO-DETR, RHINO, and OrientedFormer.
-Features Hungarian Bipartite Matching (scipy.optimize.linear_sum_assignment),
-Multi-Task Loss (Cross-Entropy/Focal classification, L1 box regression, periodic continuous angle loss),
-AdamW optimizer with CosineAnnealingLR, PyTorch AMP mixed precision,
-and per-epoch checkpointing with automatic Google Drive persistence.
+Transformer & DETR-Based Oriented Object Detection (OBB) PyTorch Training Engine
+=================================================================================
+Algorithmic & Upstream Framework Provenance:
+    This training engine implements the end-to-end set prediction and Hungarian matching
+    protocol established across premier transformer-based aerial detection research:
+    1. DETR / Deformable-DETR Upstream:
+       - "End-to-End Object Detection with Transformers" (ECCV 2020) / https://github.com/facebookresearch/detr
+       - "Deformable DETR" (ICLR 2021) / https://github.com/fundamentalvision/Deformable-DETR
+    2. AO2-DETR (IEEE TCSVT 2023): https://github.com/Ixiaohuihuihui/AO2-DETR
+    3. ARS-DETR (IEEE TGRS 2024 / ICCV 2023): https://github.com/httle/ARS-DETR
+    4. RiO-DETR (ECCV 2024 Oral): https://github.com/RicePasteM/RiO-DETR
+    5. OrientedFormer (IEEE TGRS 2024): https://github.com/wokaikaixinxin/OrientedFormer
+    6. RHINO / AI4RS (CVPR 2024): https://github.com/wokaikaixinxin/ai4rs
+
+Supported Architectures:
+    ARS-DETR, AO2-DETR, RiO-DETR, RHINO, OrientedFormer.
+
+Training Formulation & Features:
+    - Bipartite Matching: scipy.optimize.linear_sum_assignment solves the global minimum cost assignment
+      matrix between M predictions and N ground-truth targets (classification score + L1 distance + angle error).
+    - Multi-Task Composite Set Loss:
+        * Class Focal / Cross-Entropy Loss on matched query indices
+        * L1 Loss on normalized bounding box parameters (cx, cy, w, h)
+        * Periodic Circular Angle Loss: L_angle = 1 - cos(2 * (theta_pred - theta_gt))
+    - Optimization: AdamW with CosineAnnealingLR and warmup.
+    - Precision: PyTorch AMP (Automatic Mixed Precision) with GradScaler.
+    - Storage & Checkpointing: Real-time validation mAP tracking with persistent Google Drive sync.
 """
 
 from __future__ import annotations

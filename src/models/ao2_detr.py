@@ -1,7 +1,19 @@
 """
-AO2-DETR: Arbitrary-Oriented Object Detection Transformer (IEEE TCSVT 2023).
-An end-to-end framework featuring Oriented Proposal Generation (OPG) and
-Adaptive Oriented Proposal Refinement (AOPR) to eliminate anchor boxes and NMS.
+AO2-DETR: Arbitrary-Oriented Object Detection Transformer
+=========================================================
+Paper Reference:
+    "AO2-DETR: Arbitrary-Oriented Object Detection Transformer"
+    Authors: Lanjun Dai, Hong Liu, Hao Tang, Zehao Wu, Shengchao Chen
+    Venue: IEEE Transactions on Circuits and Systems for Video Technology (TCSVT), 2023.
+    DOI: 10.1109/TCSVT.2023.3243144
+    Official GitHub Repository: https://github.com/Ixiaohuihuihui/AO2-DETR
+
+Key Innovations & Architecture:
+    1. Oriented Proposal Generation (OPG): Directly extracts oriented object candidates from multi-scale feature maps,
+       avoiding standard axis-aligned prior box bias.
+    2. Adaptive Oriented Proposal Refinement (AOPR): Iteratively refines oriented proposals via cross-attention with
+       rotation-guided positional encoding, mitigating misalignment between oriented objects and receptive fields.
+    3. Fully End-to-End: Eliminates complex post-processing such as Oriented Non-Maximum Suppression (Rotated NMS).
 """
 
 from __future__ import annotations

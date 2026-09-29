@@ -253,8 +253,11 @@ def train_dense_model(
     workers = actual_workers
 
     # 2. Datasets and Loaders
-    train_raw = AerialOBBDataset(dataset_name=dataset_name, data_dir=data_dir, split="train")
-    val_raw = AerialOBBDataset(dataset_name=dataset_name, data_dir=data_dir, split="val")
+    max_train_samples = kwargs.get("max_train_samples", None)
+    max_val_samples = kwargs.get("max_val_samples", None)
+
+    train_raw = AerialOBBDataset(dataset_name=dataset_name, data_dir=data_dir, split="train", max_samples=max_train_samples)
+    val_raw = AerialOBBDataset(dataset_name=dataset_name, data_dir=data_dir, split="val", max_samples=max_val_samples)
 
     labeled_train = sum(1 for s in train_raw.samples if s["label_path"] is not None and s["label_path"].exists())
     print(f"[*] Verified training set for '{dataset_name}': {len(train_raw)} images ({labeled_train} with valid label files).")
@@ -385,6 +388,18 @@ def train_dense_model(
             running_box += (losses["center_loss"] + losses["dim_loss"]).item()
             running_ang += losses["angle_loss"].item()
             batch_count += 1
+
+            total_train_batches = len(train_loader) if max_batches is None else min(len(train_loader), max_batches)
+            log_interval = max(1, total_train_batches // 10)
+            if b_idx % log_interval == 0 or b_idx == total_train_batches - 1 or b_idx == 0:
+                elapsed_b = time.time() - epoch_start
+                fps = (b_idx + 1) * imgs.shape[0] / max(elapsed_b, 1e-4)
+                print(
+                    f"  [{model_name}] Epoch [{epoch:02d}/{epochs:02d}] "
+                    f"Batch {b_idx + 1}/{total_train_batches} ({(b_idx + 1)/total_train_batches * 100:.1f}%) | "
+                    f"Loss: {loss.item():.4f} | Speed: {fps:.1f} imgs/s",
+                    flush=True,
+                )
 
         scheduler.step()
 

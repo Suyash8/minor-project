@@ -188,6 +188,18 @@ def parse_args():
         help="DataLoader worker processes for GPU training. If omitted or None, automatically configured.",
     )
     parser.add_argument(
+        "--train-samples",
+        type=int,
+        default=None,
+        help="Limit number of training images used per dataset per epoch (e.g. --train-samples 500 for fast benchmarking).",
+    )
+    parser.add_argument(
+        "--max-train-batches",
+        type=int,
+        default=None,
+        help="Cap the number of training batches per epoch (e.g. --max-train-batches 50).",
+    )
+    parser.add_argument(
         "--imgsz",
         type=int,
         default=640,
@@ -667,7 +679,9 @@ def run_training_suite(
                     project_dir=str(weights_dir),
                     data_dir=str(data_dir),
                     cache=getattr(args, "cache", None),
-                    max_batches=2 if args.test else None,
+                    max_batches=2 if args.test else getattr(args, "max_train_batches", None),
+                    max_train_samples=getattr(args, "train_samples", None),
+                    max_val_samples=getattr(args, "max_samples", None),
                 )
                 trained_weights[(m_name, d_name)] = res["best_weights"]
                 print(f"[✓] Checkpoint saved: {res['best_weights']}")

@@ -918,77 +918,82 @@ def main():
             print("[*] No evaluation results available to generate report (training-only step).")
             return
 
-    # Save CSV and JSON
-    df_final = pd.DataFrame(final_results)
-    csv_path = output_dir / "benchmark_summary.csv"
-    df_final.to_csv(csv_path, index=False)
-    if post_results:
-        df_final.to_csv(output_dir / "post_train_summary.csv", index=False)
-    atomic_save_json(final_results, output_dir / "benchmark_metrics.json")
+        # Save CSV and JSON
+        df_final = pd.DataFrame(final_results)
+        csv_path = output_dir / "benchmark_summary.csv"
+        df_final.to_csv(csv_path, index=False)
+        if post_results:
+            df_final.to_csv(output_dir / "post_train_summary.csv", index=False)
+        atomic_save_json(final_results, output_dir / "benchmark_metrics.json")
 
-    # Identify best performing model
-    best_row_map50 = df_final.loc[df_final["map50"].idxmax()]
-    best_model = best_row_map50["model"]
-    best_dataset = best_row_map50["dataset"]
+        # Identify best performing model
+        best_row_map50 = df_final.loc[df_final["map50"].idxmax()]
+        best_model = best_row_map50["model"]
+        best_dataset = best_row_map50["dataset"]
 
-    # Comparative charts
-    if args.save_plots:
-        comparison_chart_path = plots_dir / "model_benchmark_comparison.png"
-        plot_benchmark_comparison(final_results, comparison_chart_path)
+        # Comparative charts
+        if args.save_plots:
+            comparison_chart_path = plots_dir / "model_benchmark_comparison.png"
+            plot_benchmark_comparison(final_results, comparison_chart_path)
 
+            if pre_results and post_results:
+                pre_post_chart_path = plots_dir / "pre_vs_post_comparison.png"
+                plot_pre_post_comparison(pre_results, post_results, pre_post_chart_path)
+
+        # Markdown Report
+        md_report = generate_markdown_report(
+            results=final_results,
+            best_model=best_model,
+            best_dataset=best_dataset,
+            pre_results=pre_results if pre_results else None,
+        )
+        report_path = output_dir / "benchmark_report.md"
+        tmp_report = report_path.with_name(f"{report_path.name}.tmp")
+        with open(tmp_report, "w", encoding="utf-8") as f:
+            f.write(md_report)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_report, report_path)
+
+        # Final manifest
+        save_run_manifest(
+            results_dir=results_dir,
+            run_id=run_id,
+            summary_rows=pre_results + post_results,
+            completed_pairs=[],
+            pending_pairs=[],
+            is_completed=True,
+        )
+
+        # Print Terminal Summaries
         if pre_results and post_results:
-            pre_post_chart_path = plots_dir / "pre_vs_post_comparison.png"
-            plot_pre_post_comparison(pre_results, post_results, pre_post_chart_path)
+            print("\n" + "=" * 80)
+            print(" PRE-TRAINING VS POST-TRAINING EMPIRICAL PROGRESSION (DELTAS)")
+            print("=" * 80)
+            print(format_delta_table(pre_results, post_results))
+            print("=" * 80)
 
-    # Markdown Report
-    md_report = generate_markdown_report(
-        results=final_results,
-        best_model=best_model,
-        best_dataset=best_dataset,
-        pre_results=pre_results if pre_results else None,
-    )
-    report_path = output_dir / "benchmark_report.md"
-    tmp_report = report_path.with_name(f"{report_path.name}.tmp")
-    with open(tmp_report, "w", encoding="utf-8") as f:
-        f.write(md_report)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp_report, report_path)
-
-    # Final manifest
-    save_run_manifest(
-        results_dir=results_dir,
-        run_id=run_id,
-        summary_rows=pre_results + post_results,
-        completed_pairs=[],
-        pending_pairs=[],
-        is_completed=True,
-    )
-
-    # Print Terminal Summaries
-    if pre_results and post_results:
         print("\n" + "=" * 80)
-        print(" PRE-TRAINING VS POST-TRAINING EMPIRICAL PROGRESSION (DELTAS)")
+        print(f" FINAL {'POST-TRAIN ' if post_results else ''}BENCHMARK SUMMARY")
         print("=" * 80)
-        print(format_delta_table(pre_results, post_results))
+        print(format_metrics_table(final_results))
         print("=" * 80)
 
-    print("\n" + "=" * 80)
-    print(f" FINAL {'POST-TRAIN ' if post_results else ''}BENCHMARK SUMMARY")
-    print("=" * 80)
-    print(format_metrics_table(final_results))
-    print("=" * 80)
-
-    print(f"\n[✓] Results, checkpoints, and reports saved to: {output_dir}")
-    print(f"    - Benchmark Summary CSV : {csv_path}")
-    if pre_results:
-        print(f"    - Pre-Train Summary CSV : {output_dir / 'pre_train_summary.csv'}")
-    if post_results:
-        print(f"    - Post-Train Summary CSV: {output_dir / 'post_train_summary.csv'}")
-    print(f"    - Markdown Full Report  : {report_path}")
-    print(f"    - Metrics JSON          : {output_dir / 'benchmark_metrics.json'}")
-    if args.save_plots:
-        print(f"    - Visual Plots Dir      : {plots_dir}")
+        print(f"\n[✓] Results, checkpoints, and reports saved to: {output_dir}")
+        print(f"    - Benchmark Summary CSV : {csv_path}")
+        if pre_results:
+            print(f"    - Pre-Train Summary CSV : {output_dir / 'pre_train_summary.csv'}")
+        if post_results:
+            print(f"    - Post-Train Summary CSV: {output_dir / 'post_train_summary.csv'}")
+        print(f"    - Markdown Full Report  : {report_path}")
+        print(f"    - Metrics JSON          : {output_dir / 'benchmark_metrics.json'}")
+        if args.save_plots:
+            print(f"    - Visual Plots Dir      : {plots_dir}")
+    else:
+        print("\n" + "=" * 80)
+        print(" PIPELINE EXECUTION FINISHED")
+        print("=" * 80)
+        print(f"[✓] Checkpoints and outputs saved to: {output_dir}")
 
 
 if __name__ == "__main__":

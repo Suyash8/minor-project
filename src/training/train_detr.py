@@ -388,10 +388,14 @@ def train_detr_model(
             net.load_state_dict(ckpt["model_state"], strict=False)
             if "optimizer_state" in ckpt:
                 optimizer.load_state_dict(ckpt["optimizer_state"])
-            start_epoch = ckpt.get("epoch", 0) + 1
+            ckpt_epoch = ckpt.get("epoch", 0)
+            start_epoch = ckpt_epoch + 1
             best_val_loss = ckpt.get("best_val_loss", float("inf"))
             history = ckpt.get("history", [])
-            print(f"[✓] Successfully resumed training from epoch {start_epoch} (Best val loss: {best_val_loss:.4f})")
+            print(f"[✓] Successfully resumed training from epoch {start_epoch} (Completed: {ckpt_epoch} epochs, Best val loss: {best_val_loss:.4f})")
+            if start_epoch > epochs:
+                print(f"[*] Checkpoint already reached epoch {ckpt_epoch} >= target {epochs} epochs. No further training needed for '{model_name}'.")
+                print(f"    (Tip: to train further, specify --epochs with a value greater than {ckpt_epoch})")
         except Exception as e:
             print(f"[!] Could not resume from checkpoint: {e}. Starting fresh.")
 

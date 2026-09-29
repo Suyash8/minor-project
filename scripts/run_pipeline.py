@@ -121,13 +121,20 @@ def parse_args():
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 
-    # Core Execution Modes
+    # Core Execution Modes & Granular Steps
+    parser.add_argument(
+        "--steps",
+        nargs="+",
+        default=None,
+        choices=["pre_eval", "train", "post_eval", "report"],
+        help="Granular pipeline steps to execute. E.g. '--steps train' or '--steps post_eval report'. Overrides --mode if specified.",
+    )
     parser.add_argument(
         "--mode",
         type=str,
         default="full",
         choices=["full", "train", "eval"],
-        help="Execution mode: 'full' (Pre-eval -> Train -> Post-eval -> Deltas), 'train' (Train only), 'eval' (Eval only).",
+        help="Execution mode (macro preset): 'full' (all 4 steps), 'train' (training only), 'eval' (evaluation only). Overridden by --steps if given.",
     )
     parser.add_argument(
         "--test", "-t",
@@ -247,9 +254,23 @@ def parse_args():
     )
     parser.add_argument(
         "--max-samples",
+        "--val-samples",
+        dest="max_samples",
         type=int,
         default=None,
-        help="Limit number of evaluation samples per dataset.",
+        help="Limit number of validation/evaluation images per dataset (e.g. --val-samples 100). If omitted, evaluates full split.",
+    )
+    parser.add_argument(
+        "--pre-val-samples",
+        type=int,
+        default=None,
+        help="Specific validation sample limit for Pre-Training baseline evaluation. Falls back to --val-samples if omitted.",
+    )
+    parser.add_argument(
+        "--post-val-samples",
+        type=int,
+        default=None,
+        help="Specific validation sample limit for Post-Training evaluation. Falls back to --val-samples if omitted.",
     )
     parser.add_argument(
         "--save-plots",
@@ -453,11 +474,18 @@ def run_evaluation_suite(
     print(f"{'=' * 75}")
 
     for d_name in valid_datasets:
+        # Determine phase-specific validation sample limit
+        phase_samples = args.max_samples
+        if phase_label == "pre_train" and args.pre_val_samples is not None:
+            phase_samples = args.pre_val_samples
+        elif phase_label == "post_train" and args.post_val_samples is not None:
+            phase_samples = args.post_val_samples
+
         dataset = AerialOBBDataset(
             dataset_name=d_name,
             data_dir=data_dir,
             split="val",
-            max_samples=args.max_samples,
+            max_samples=phase_samples,
         )
         print(f"\n[*] Evaluating on Dataset: {d_name.upper()} ({len(dataset)} validation samples)")
 
@@ -669,11 +697,47 @@ def main():
     args.batch_size = hw_config["eval_batch_size"]
     args.train_workers = hw_config["workers"]
 
+    # Determine Active Steps (Granular --steps overrides or mode preset)
+    if args.steps:
+        # Normalize step aliases
+        step_alias_map = {
+            "pre": "pre_eval",
+            "pre_eval": "pre_eval",
+            "preeval": "pre_eval",
+            "train": "train",
+            "post": "post_eval",
+            "post_eval": "post_eval",
+            "posteval": "post_eval",
+            "report": "report",
+            "eval": "post_eval",
+        }
+        active_steps = set()
+        for s in args.steps:
+            s_clean = s.lower().strip()
+            if s_clean in step_alias_map:
+                active_steps.add(step_alias_map[s_clean])
+            else:
+                active_steps.add(s_clean)
+        # Always run reporting if post_eval or pre_eval is selected and report is not explicitly excluded
+        if "report" not in active_steps and ("pre_eval" in active_steps or "post_eval" in active_steps):
+            active_steps.add("report")
+    else:
+        # Default presets from --mode
+        if args.mode == "full":
+            active_steps = {"pre_eval", "train", "post_eval", "report"}
+        elif args.mode == "train":
+            active_steps = {"train"}
+        elif args.mode == "eval":
+            active_steps = {"post_eval", "report"}
+        else:
+            active_steps = {"pre_eval", "train", "post_eval", "report"}
+
     print(f"[*] Hardware Environment : {hw_config['gpu_name']} (PyTorch device: '{device}')")
     print(f"[*] Hardware Resources   : {hw_config['cpu_count']} CPU cores | {hw_config['total_ram_gb']} GB RAM | {hw_config['total_vram_gb']} GB VRAM")
     print(f"[*] Auto-Tuned Config    : Train Batch={args.train_batch_size}, Eval Batch={args.batch_size}, Workers={args.train_workers}, AMP={hw_config['amp_mode']}")
     print(f"[*] Memory State         : {format_memory_summary()}")
-    print(f"[*] Execution Mode       : '{args.mode.upper()}'")
+    print(f"[*] Active Pipeline Steps: {sorted(list(active_steps))}")
+    print(f"[*] Execution Mode       : '{args.mode.upper()}' (Configured via {'--steps' if args.steps else '--mode'})")
 
     if args.test:
         print("[*] --test flag activated! Fast test mode.")
@@ -764,11 +828,20 @@ def main():
     setup_signal_handlers(graceful_exit)
 
     # -------------------------------------------------------------
-    # EXECUTION PHASES ACCORDING TO --mode
+    # EXECUTION PHASES ACCORDING TO --steps / --mode
     # -------------------------------------------------------------
 
-    # Phase 1: Pre-Training Baseline Evaluation (only in full mode)
-    if args.mode == "full":
+    # If pre-training evaluation is skipped in this invocation, attempt to load prior pre_train results from disk
+    pre_summary_file = output_dir / "pre_train_summary.csv"
+    if "pre_eval" not in active_steps and pre_summary_file.exists():
+        try:
+            pre_results = pd.read_csv(pre_summary_file).to_dict(orient="records")
+            print(f"[*] Loaded prior pre-training baseline results ({len(pre_results)} entries) from {pre_summary_file.name}")
+        except Exception:
+            pass
+
+    # Phase 1: Pre-Training Baseline Evaluation
+    if "pre_eval" in active_steps:
         pre_results = run_evaluation_suite(
             phase_label="pre_train",
             valid_datasets=valid_datasets,
@@ -787,8 +860,8 @@ def main():
             df_pre.to_csv(output_dir / "pre_train_summary.csv", index=False)
             atomic_save_json(pre_results, output_dir / "pre_train_metrics.json")
 
-    # Phase 2: GPU Training (in full or train mode)
-    if args.mode in ("full", "train"):
+    # Phase 2: GPU Training
+    if "train" in active_steps:
         trained_weights = run_training_suite(
             valid_datasets=valid_datasets,
             requested_models=requested_models,
@@ -798,9 +871,9 @@ def main():
             args=args,
         )
 
-    # Phase 3: Post-Training Evaluation (in full or eval mode)
-    if args.mode in ("full", "eval"):
-        eval_phase = "post_train" if args.mode == "full" else "eval"
+    # Phase 3: Post-Training Evaluation
+    if "post_eval" in active_steps:
+        eval_phase = "post_train" if "pre_eval" in active_steps or pre_results else "eval"
         post_results = run_evaluation_suite(
             phase_label=eval_phase,
             valid_datasets=valid_datasets,
@@ -815,11 +888,21 @@ def main():
             plots_dir=plots_dir,
         )
 
+    # If post_eval wasn't run in this session but a prior post_train file exists, load it
+    post_summary_file = output_dir / "post_train_summary.csv"
+    if not post_results and post_summary_file.exists():
+        try:
+            post_results = pd.read_csv(post_summary_file).to_dict(orient="records")
+            print(f"[*] Loaded prior post-training evaluation results ({len(post_results)} entries) from {post_summary_file.name}")
+        except Exception:
+            pass
+
     # Phase 4: Comparative Reporting & Synthesis
-    final_results = post_results if post_results else pre_results
-    if not final_results:
-        print("[!] No evaluations were performed in this run.")
-        return
+    if "report" in active_steps:
+        final_results = post_results if post_results else pre_results
+        if not final_results:
+            print("[*] No evaluation results available to generate report (training-only step).")
+            return
 
     # Save CSV and JSON
     df_final = pd.DataFrame(final_results)

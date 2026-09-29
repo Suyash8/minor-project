@@ -482,9 +482,16 @@ def run_evaluation_suite(
                 if trained_weights_map and (m_name, d_name) in trained_weights_map:
                     weights_path = trained_weights_map[(m_name, d_name)]
                 else:
-                    candidate = weights_dir / f"{m_name}_{d_name}_best.pt"
-                    if candidate.exists():
-                        weights_path = str(candidate)
+                    candidates = [
+                        weights_dir / f"{m_name}_{d_name}_best.pt",
+                        weights_dir / f"{m_name}_{d_name}" / f"{m_name}_best.pt",
+                        weights_dir / f"{m_name}_{d_name}" / "best.pt",
+                        weights_dir / f"{m_name}_{d_name}" / "weights" / "best.pt",
+                    ]
+                    for cand in candidates:
+                        if cand.exists():
+                            weights_path = str(cand)
+                            break
 
             try:
                 model = get_model(

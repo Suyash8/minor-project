@@ -466,7 +466,9 @@ def train_dense_model(
             if is_drive_mounted():
                 drive_save = get_drive_root() / "weights" / f"{model_name}_{dataset_name}"
                 drive_save.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(best_weights_path, drive_save / f"{model_name}_best.pt")
+                target_copy = drive_save / f"{model_name}_best.pt"
+                if best_weights_path.resolve() != target_copy.resolve():
+                    shutil.copy2(best_weights_path, target_copy)
 
     # Save training history JSON
     history_path = save_dir / "train_history.json"

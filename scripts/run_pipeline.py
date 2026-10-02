@@ -32,6 +32,16 @@ from __future__ import annotations
 import os
 import sys
 import time
+
+# Windows console encoding and OpenMP duplicate runtime mitigation
+if sys.platform == "win32":
+    os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+    if hasattr(sys.stdout, "reconfigure"):
+        try:
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
 import argparse
 import datetime
 import json
@@ -540,7 +550,7 @@ def run_evaluation_suite(
                     num_classes=len(dataset.class_names),
                     weights_path=weights_path,
                 )
-                if not weights_path:
+                if not model.is_loaded:
                     model.load()
             except Exception as e:
                 print(f"[!] Could not load model '{m_name}': {e}", file=sys.stderr)

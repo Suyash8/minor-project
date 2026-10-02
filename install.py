@@ -4,9 +4,18 @@ Automated dependency installer for Aerial OBB Detection & Benchmark Suite.
 Prefers uv for instant installations, falling back to standard pip.
 """
 
+import os
 import sys
 import subprocess
 import shutil
+
+# Ensure Windows cp1252/terminal compatibility
+if sys.platform == "win32" and hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
 def main():
     print("==================================================")

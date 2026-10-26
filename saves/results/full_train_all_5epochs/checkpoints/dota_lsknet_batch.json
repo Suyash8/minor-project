@@ -1,0 +1,11 @@
+{
+  "dataset": "dota",
+  "model": "lsknet",
+  "batch_idx": 15,
+  "total_batches": 15,
+  "samples_processed": 462,
+  "total_samples": 462,
+  "progress_pct": 100.0,
+  "elapsed_seconds": 111.43,
+  "updated_at": "2026-09-28T23:07:24.410433"
+}

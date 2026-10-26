@@ -837,17 +837,27 @@ def main():
     trained_weights = {}
 
     # Signal handler for graceful checkpoint saving
+    _is_exiting = False
+
     def graceful_exit(signum, frame):
+        nonlocal _is_exiting
+        if _is_exiting:
+            return
+        _is_exiting = True
         print(f"\n[!] Interruption signal caught. Flushing run manifest to {output_dir}...")
-        all_rows = pre_results + post_results
-        save_run_manifest(
-            results_dir=results_dir,
-            run_id=run_id,
-            summary_rows=all_rows,
-            completed_pairs=[],
-            pending_pairs=[],
-            is_completed=False,
-        )
+        try:
+            output_dir.mkdir(parents=True, exist_ok=True)
+            all_rows = pre_results + post_results
+            save_run_manifest(
+                results_dir=results_dir,
+                run_id=run_id,
+                summary_rows=all_rows,
+                completed_pairs=[],
+                pending_pairs=[],
+                is_completed=False,
+            )
+        except Exception as e:
+            print(f"[!] Warning during graceful exit save: {e}", file=sys.stderr)
 
     setup_signal_handlers(graceful_exit)
 

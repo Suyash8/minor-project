@@ -1,0 +1,11 @@
+{
+  "dataset": "codrone",
+  "model": "yolov8m-obb",
+  "batch_idx": 32,
+  "total_batches": 32,
+  "samples_processed": 2000,
+  "total_samples": 2000,
+  "progress_pct": 100.0,
+  "elapsed_seconds": 389.93,
+  "updated_at": "2026-09-23T06:09:51.797666"
+}

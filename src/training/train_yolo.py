@@ -97,10 +97,21 @@ def train_yolo_obb(
     best_pt = save_dir / "weights" / "best.pt"
 
     # Check for resumption
-    can_resume = resume and last_pt.exists()
-    if can_resume:
-        print(f"[*] Found previous checkpoint at: {last_pt}. Resuming training seamlessly...")
-        model = YOLO(str(last_pt))
+    can_resume = False
+    if resume and last_pt.exists():
+        try:
+            # Check if checkpoint retains optimizer/epoch training state
+            ckpt_obj = torch.load(str(last_pt), map_location="cpu")
+            if isinstance(ckpt_obj, dict) and ("epoch" in ckpt_obj or "optimizer" in ckpt_obj):
+                can_resume = True
+                print(f"[*] Found resumable training checkpoint at: {last_pt}. Resuming training seamlessly...")
+                model = YOLO(str(last_pt))
+            else:
+                print(f"[*] Checkpoint at {last_pt} is stripped / completed. Starting run with these weights...")
+                model = YOLO(str(last_pt))
+        except Exception:
+            can_resume = False
+            model = YOLO(str(last_pt))
     else:
         init_weights = pretrained_weights
         if not init_weights:

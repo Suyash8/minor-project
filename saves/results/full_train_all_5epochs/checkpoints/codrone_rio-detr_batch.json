@@ -1,0 +1,11 @@
+{
+  "dataset": "codrone",
+  "model": "rio-detr",
+  "batch_idx": 63,
+  "total_batches": 63,
+  "samples_processed": 2000,
+  "total_samples": 2000,
+  "progress_pct": 100.0,
+  "elapsed_seconds": 195.25,
+  "updated_at": "2026-09-29T03:11:26.164776"
+}

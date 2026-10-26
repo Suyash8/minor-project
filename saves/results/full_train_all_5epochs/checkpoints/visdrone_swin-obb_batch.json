@@ -1,0 +1,11 @@
+{
+  "dataset": "visdrone",
+  "model": "swin-obb",
+  "batch_idx": 18,
+  "total_batches": 18,
+  "samples_processed": 548,
+  "total_samples": 548,
+  "progress_pct": 100.0,
+  "elapsed_seconds": 56.09,
+  "updated_at": "2026-09-29T01:51:50.464313"
+}

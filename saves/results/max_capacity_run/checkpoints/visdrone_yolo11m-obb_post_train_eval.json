@@ -1,0 +1,33 @@
+{
+  "dataset": "visdrone",
+  "model": "yolo11m-obb_post_train",
+  "completed": true,
+  "timestamp": "2026-09-23T03:35:33.210900",
+  "summary": {
+    "model": "yolo11m-obb",
+    "dataset": "visdrone",
+    "phase": "post_train",
+    "map50": 0.0,
+    "map75": 0.0,
+    "map50_95": 0.0,
+    "ap_small": 0.2,
+    "ap_medium": 0.4,
+    "ap_large": 1.0,
+    "precision": 0.0,
+    "recall": 0.0,
+    "f1": 0.0,
+    "accuracy": 0.0,
+    "specificity": 0.9795454545454545,
+    "angle_mae": 0.0,
+    "angle_rmse": 0.0,
+    "pearson_r": 0.0,
+    "spearman_rho": 0.0,
+    "r2_score": 0.0,
+    "center_offset_mae": 0.0,
+    "center_offset_rmse": 0.0,
+    "aspect_ratio_r2": 0.0,
+    "fps": 48.41014921863539,
+    "mean_latency_ms": 20.656825400055823
+  },
+  "details": {}
+}

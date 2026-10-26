@@ -1,0 +1,11 @@
+{
+  "dataset": "codrone",
+  "model": "std",
+  "batch_idx": 28,
+  "total_batches": 63,
+  "samples_processed": 880,
+  "total_samples": 2000,
+  "progress_pct": 44.0,
+  "elapsed_seconds": 932.6,
+  "updated_at": "2026-10-14T06:38:33.789930"
+}

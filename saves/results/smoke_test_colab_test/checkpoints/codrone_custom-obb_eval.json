@@ -1,0 +1,32 @@
+{
+  "dataset": "codrone",
+  "model": "custom-obb",
+  "completed": true,
+  "timestamp": "2026-09-23T02:39:58.665027",
+  "summary": {
+    "model": "custom-obb",
+    "dataset": "codrone",
+    "map50": 0.6014262140496458,
+    "map75": 0.10800722929429335,
+    "map50_95": 0.2766482987582765,
+    "ap_small": 0.577970297029547,
+    "ap_medium": 0.74051155115469,
+    "ap_large": 1.0,
+    "precision": 0.6999007936507936,
+    "recall": 0.591919191919192,
+    "f1": 0.5944061542745753,
+    "accuracy": 0.46153846153846156,
+    "specificity": 0.983409050741379,
+    "angle_mae": 5.424686431884766,
+    "angle_rmse": 6.669820785522461,
+    "pearson_r": 0.4508253335952759,
+    "spearman_rho": -0.05887096774193549,
+    "r2_score": -0.09108313836229098,
+    "center_offset_mae": 4.024223804473877,
+    "center_offset_rmse": 4.434098243713379,
+    "aspect_ratio_r2": 0.8365713186992305,
+    "fps": 6.5713402854746406,
+    "mean_latency_ms": 152.17595749993507
+  },
+  "details": {}
+}

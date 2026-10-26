@@ -1,0 +1,33 @@
+{
+  "dataset": "visdrone",
+  "model": "yolov8m-obb_pre_train",
+  "completed": true,
+  "timestamp": "2026-09-23T05:18:18.362663",
+  "summary": {
+    "model": "yolov8m-obb",
+    "dataset": "visdrone",
+    "phase": "pre_train",
+    "map50": 0.0,
+    "map75": 0.0,
+    "map50_95": 0.0,
+    "ap_small": 0.0,
+    "ap_medium": 0.0,
+    "ap_large": 0.0,
+    "precision": 0.0,
+    "recall": 0.0,
+    "f1": 0.0,
+    "accuracy": 0.0,
+    "specificity": 0.9,
+    "angle_mae": NaN,
+    "angle_rmse": NaN,
+    "pearson_r": NaN,
+    "spearman_rho": NaN,
+    "r2_score": NaN,
+    "center_offset_mae": NaN,
+    "center_offset_rmse": NaN,
+    "aspect_ratio_r2": NaN,
+    "fps": 48.744967228278604,
+    "mean_latency_ms": 20.514938400037863
+  },
+  "details": {}
+}

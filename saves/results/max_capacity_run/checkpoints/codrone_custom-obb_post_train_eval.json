@@ -1,0 +1,33 @@
+{
+  "dataset": "codrone",
+  "model": "custom-obb_post_train",
+  "completed": true,
+  "timestamp": "2026-09-23T03:35:39.437733",
+  "summary": {
+    "model": "custom-obb",
+    "dataset": "codrone",
+    "phase": "post_train",
+    "map50": 0.0,
+    "map75": 0.0,
+    "map50_95": 0.0,
+    "ap_small": 0.25,
+    "ap_medium": 0.08333333333333333,
+    "ap_large": 1.0,
+    "precision": 0.0,
+    "recall": 0.0,
+    "f1": 0.0,
+    "accuracy": 0.0,
+    "specificity": 0.9254393652060383,
+    "angle_mae": 0.0,
+    "angle_rmse": 0.0,
+    "pearson_r": 0.0,
+    "spearman_rho": 0.0,
+    "r2_score": 0.0,
+    "center_offset_mae": 0.0,
+    "center_offset_rmse": 0.0,
+    "aspect_ratio_r2": 0.0,
+    "fps": 47.05138343255946,
+    "mean_latency_ms": 21.2533601999894
+  },
+  "details": {}
+}

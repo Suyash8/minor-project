@@ -1,0 +1,11 @@
+{
+  "dataset": "visdrone",
+  "model": "lsknet",
+  "batch_idx": 18,
+  "total_batches": 18,
+  "samples_processed": 548,
+  "total_samples": 548,
+  "progress_pct": 100.0,
+  "elapsed_seconds": 30.79,
+  "updated_at": "2026-09-29T02:05:22.730630"
+}

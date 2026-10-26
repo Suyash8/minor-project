@@ -1,0 +1,11 @@
+{
+  "dataset": "dota",
+  "model": "ao2-detr",
+  "batch_idx": 15,
+  "total_batches": 15,
+  "samples_processed": 462,
+  "total_samples": 462,
+  "progress_pct": 100.0,
+  "elapsed_seconds": 86.47,
+  "updated_at": "2026-09-28T23:03:45.726047"
+}

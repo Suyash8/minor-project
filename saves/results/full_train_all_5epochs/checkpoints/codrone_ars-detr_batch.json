@@ -1,0 +1,11 @@
+{
+  "dataset": "codrone",
+  "model": "ars-detr",
+  "batch_idx": 63,
+  "total_batches": 63,
+  "samples_processed": 2000,
+  "total_samples": 2000,
+  "progress_pct": 100.0,
+  "elapsed_seconds": 199.51,
+  "updated_at": "2026-09-29T03:03:44.296394"
+}

@@ -38,26 +38,39 @@ def resolve_pipeline_paths(
     # 1. Resolve DATA_DIR
     if data_dir:
         resolved_data = Path(data_dir).resolve()
-    elif drive_mounted:
-        candidate_drive_dirs = [
-            drive_dir / "data",
-            Path("/content/drive/MyDrive/data"),
-            Path("/content/drive/MyDrive/minor-project/data"),
-            Path("/content/drive/MyDrive/Datasets"),
-        ]
-        found_drive_data = None
-        for cand in candidate_drive_dirs:
-            if cand.exists() and any(cand.iterdir()):
-                found_drive_data = cand.resolve()
-                break
-        if found_drive_data:
-            resolved_data = found_drive_data
-        elif (PROJECT_ROOT / "data").exists() and any((PROJECT_ROOT / "data").iterdir()):
-            resolved_data = DEFAULT_DATA_DIR.resolve()
-        else:
-            resolved_data = (drive_dir / "data").resolve()
     else:
-        resolved_data = DEFAULT_DATA_DIR.resolve()
+        # Check high-speed local disk locations first (especially in Colab, where Drive is slow FUSE)
+        local_fast_candidates = [
+            Path("/content/data"),
+            Path("/tmp/data"),
+            PROJECT_ROOT / "data",
+        ]
+        found_local_data = None
+        for cand in local_fast_candidates:
+            if cand.exists() and any(cand.iterdir()):
+                found_local_data = cand.resolve()
+                break
+
+        if found_local_data:
+            resolved_data = found_local_data
+        elif drive_mounted:
+            candidate_drive_dirs = [
+                drive_dir / "data",
+                Path("/content/drive/MyDrive/data"),
+                Path("/content/drive/MyDrive/minor-project/data"),
+                Path("/content/drive/MyDrive/Datasets"),
+            ]
+            found_drive_data = None
+            for cand in candidate_drive_dirs:
+                if cand.exists() and any(cand.iterdir()):
+                    found_drive_data = cand.resolve()
+                    break
+            if found_drive_data:
+                resolved_data = found_drive_data
+            else:
+                resolved_data = (drive_dir / "data").resolve()
+        else:
+            resolved_data = DEFAULT_DATA_DIR.resolve()
 
     # 2. Resolve WEIGHTS_DIR
     if weights_dir:

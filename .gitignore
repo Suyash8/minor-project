@@ -16,6 +16,9 @@ credentials.json
 # Large data & weights (root level only)
 /data/
 /weights/
+*/weights/
+*/weights-*
+*/*.zip
 *.pt
 *.pth
 

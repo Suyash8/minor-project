@@ -1,0 +1,33 @@
+{
+  "dataset": "dota",
+  "model": "custom-obb_pre_train",
+  "completed": true,
+  "timestamp": "2026-09-23T04:27:25.406070",
+  "summary": {
+    "model": "custom-obb",
+    "dataset": "dota",
+    "phase": "pre_train",
+    "map50": 0.0,
+    "map75": 0.0,
+    "map50_95": 0.0,
+    "ap_small": 0.0,
+    "ap_medium": 0.0,
+    "ap_large": 0.0,
+    "precision": 0.0,
+    "recall": 0.0,
+    "f1": 0.0,
+    "accuracy": 0.0,
+    "specificity": 1.0,
+    "angle_mae": NaN,
+    "angle_rmse": NaN,
+    "pearson_r": NaN,
+    "spearman_rho": NaN,
+    "r2_score": NaN,
+    "center_offset_mae": NaN,
+    "center_offset_rmse": NaN,
+    "aspect_ratio_r2": NaN,
+    "fps": 62.930094948723735,
+    "mean_latency_ms": 15.890648199638235
+  },
+  "details": {}
+}

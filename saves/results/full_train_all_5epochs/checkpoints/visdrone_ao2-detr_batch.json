@@ -1,0 +1,11 @@
+{
+  "dataset": "visdrone",
+  "model": "ao2-detr",
+  "batch_idx": 18,
+  "total_batches": 18,
+  "samples_processed": 548,
+  "total_samples": 548,
+  "progress_pct": 100.0,
+  "elapsed_seconds": 16.31,
+  "updated_at": "2026-09-29T01:50:38.051646"
+}

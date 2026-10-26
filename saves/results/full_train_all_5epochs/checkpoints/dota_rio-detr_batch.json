@@ -1,0 +1,11 @@
+{
+  "dataset": "dota",
+  "model": "rio-detr",
+  "batch_idx": 15,
+  "total_batches": 15,
+  "samples_processed": 462,
+  "total_samples": 462,
+  "progress_pct": 100.0,
+  "elapsed_seconds": 85.14,
+  "updated_at": "2026-09-28T23:00:46.606275"
+}

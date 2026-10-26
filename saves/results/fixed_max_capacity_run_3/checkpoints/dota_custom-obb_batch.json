@@ -1,0 +1,11 @@
+{
+  "dataset": "dota",
+  "model": "custom-obb",
+  "batch_idx": 8,
+  "total_batches": 8,
+  "samples_processed": 462,
+  "total_samples": 462,
+  "progress_pct": 100.0,
+  "elapsed_seconds": 85.15,
+  "updated_at": "2026-09-23T06:34:55.576484"
+}

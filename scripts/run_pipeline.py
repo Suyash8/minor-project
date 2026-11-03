@@ -94,6 +94,7 @@ from src.utils.checkpoint import (
     save_run_manifest,
     load_run_manifest,
 )
+from src.utils.logging_utils import setup_run_logging, get_tracker
 from src.utils.visualizer import (
     plot_confusion_matrix,
     plot_angle_correlation,
@@ -430,6 +431,9 @@ def run_single_evaluation(
             deep_cleanup_memory()
 
     total_gt_count = sum(sum(len(c.get("boxes", [])) for c in gt) for gt in all_gt)
+    tracker = get_tracker()
+    tracker.heartbeat(model=model_name, dataset=dataset_name,
+                      progress=f"eval finished: {num_samples} samples, {total_batches} batches")
     total_pred_count = sum(sum(len(c.get("boxes", [])) for c in pr) for pr in all_preds)
     if total_gt_count == 0 and num_samples > 0:
         print(
@@ -495,6 +499,10 @@ def run_evaluation_suite(
         print(" EVALUATION SUITE")
     print(f"{'=' * 75}")
 
+    tracker = get_tracker()
+    tracker.stage_start(f"eval_{phase_label}",
+                        detail=f"models={requested_models} datasets={valid_datasets}")
+
     for d_name in valid_datasets:
         # Determine phase-specific validation sample limit
         phase_samples = args.max_samples
@@ -513,6 +521,7 @@ def run_evaluation_suite(
 
         for m_name in requested_models:
             print(f"\n  --> Model: {m_name} on {d_name} [{phase_label}]")
+            tracker.job_start(model=m_name, dataset=d_name, phase=phase_label)
 
             ckpt_model_key = f"{m_name}_{phase_label}"
             if args.resume and is_evaluation_completed(results_dir, run_id, d_name, ckpt_model_key):
@@ -525,6 +534,8 @@ def run_evaluation_suite(
                 elif cached_ckpt and "summary" in cached_ckpt:
                     print(f"      [CHECKPOINT HIT] Found completed evaluation for {ckpt_model_key} on {d_name}. Skipping.")
                     phase_summary_rows.append(cached_ckpt["summary"])
+                    tracker.job_end(model=m_name, dataset=d_name, phase=phase_label,
+                                    status="skipped_cached")
                     continue
 
             weights_path = None
@@ -554,6 +565,9 @@ def run_evaluation_suite(
                     model.load()
             except Exception as e:
                 print(f"[!] Could not load model '{m_name}': {e}", file=sys.stderr)
+                get_tracker().error(f"model load failed: {e}", model=m_name, dataset=d_name)
+                get_tracker().job_end(model=m_name, dataset=d_name, phase=phase_label,
+                                      status="load_failed", error=str(e))
                 continue
 
             eval_out = run_single_evaluation(
@@ -604,6 +618,19 @@ def run_evaluation_suite(
             }
             phase_summary_rows.append(summary_item)
 
+            tracker.job_end(model=m_name, dataset=d_name, phase=phase_label,
+                            status="ok", metrics={
+                                "map50": map_res["map50"],
+                                "map75": map_res["map75"],
+                                "map50_95": map_res["map50_95"],
+                                "f1": cls_res["macro_f1"],
+                                "precision": cls_res["macro_precision"],
+                                "recall": cls_res["macro_recall"],
+                                "angle_mae": reg_res["angle_mae"],
+                                "fps": perf_res["fps"],
+                                "total_gt_boxes": eval_out.get("total_gt_count", 0),
+                            })
+
             ang_mae = reg_res["angle_mae"]
             ang_str = f"{ang_mae:.2f}°" if (ang_mae is not None and not np.isnan(ang_mae)) else "N/A"
             pr = reg_res["angle_pearson_r"]
@@ -649,6 +676,8 @@ def run_evaluation_suite(
 
             deep_cleanup_memory()
 
+    tracker.stage_end(f"eval_{phase_label}", status="ok",
+                      detail=f"{len(phase_summary_rows)} pairs evaluated")
     return phase_summary_rows
 
 
@@ -673,9 +702,14 @@ def run_training_suite(
     train_workers = 0 if args.test or device == "cpu" else args.train_workers
     train_imgsz = 160 if args.test else args.imgsz
 
+    tracker = get_tracker()
+    tracker.stage_start("train", detail=f"models={requested_models} datasets={valid_datasets} epochs={train_epochs}")
+
     for d_name in valid_datasets:
         for m_name in requested_models:
             print(f"\n>>> [Job Start] Training '{m_name}' on '{d_name.upper()}' ({train_epochs} Epochs) <<<")
+            tracker.job_start(model=m_name, dataset=d_name, phase="train",
+                              epochs=train_epochs)
             try:
                 res = train_model(
                     model_name=m_name,
@@ -695,9 +729,16 @@ def run_training_suite(
                 )
                 trained_weights[(m_name, d_name)] = res["best_weights"]
                 print(f"[✓] Checkpoint saved: {res['best_weights']}")
+                tracker.job_end(model=m_name, dataset=d_name, phase="train",
+                                status="ok", metrics={"best_weights": res["best_weights"]})
             except Exception as e:
                 print(f"[!] Training error for {m_name} on {d_name}: {e}", file=sys.stderr)
+                tracker.error(f"training failed: {e}", model=m_name, dataset=d_name)
+                tracker.job_end(model=m_name, dataset=d_name, phase="train",
+                                status="failed", error=str(e))
 
+    tracker.stage_end("train", status="ok",
+                      detail=f"{len(trained_weights)} checkpoints produced")
     return trained_weights
 
 
@@ -762,6 +803,8 @@ def main():
     print(f"[*] Memory State         : {format_memory_summary()}")
     print(f"[*] Active Pipeline Steps: {sorted(list(active_steps))}")
     print(f"[*] Execution Mode       : '{args.mode.upper()}' (Configured via {'--steps' if args.steps else '--mode'})")
+    get_tracker().metric(name="active_steps", value=sorted(list(active_steps)))
+    get_tracker().metric(name="device", value=device)
 
     if args.test:
         print("[*] --test flag activated! Fast test mode.")
@@ -785,6 +828,14 @@ def main():
     weights_dir = paths["weights_dir"]
     results_dir = paths["results_dir"]
     output_dir = paths["output_dir"]
+
+    # ---- Run logging & tracking -------------------------------------------
+    # Mirrors all console output to <results_dir>/run_logs/<run_id>/console.log,
+    # records structured events to events.jsonl, and snapshots the exact run
+    # configuration to run_config.json. See src/utils/logging_utils.py.
+    _cfg = dict(vars(args))
+    _cfg["active_steps"] = None  # filled below once steps are resolved
+    setup_run_logging(run_id=run_id, results_dir=results_dir, config=_cfg)
 
     if paths["in_colab"]:
         print("[*] Google Colab Environment Detected.")
@@ -936,6 +987,8 @@ def main():
         final_results = post_results if post_results else pre_results
         if not final_results:
             print("[*] No evaluation results available to generate report (training-only step).")
+            get_tracker().run_end(status="completed",
+                                  error="no evaluation results for report")
             return
 
         # Save CSV and JSON
@@ -1017,4 +1070,18 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+        get_tracker().run_end(status="completed")
+    except KeyboardInterrupt:
+        get_tracker().run_end(status="interrupted", error="KeyboardInterrupt")
+        raise
+    except SystemExit as e:
+        get_tracker().run_end(status="exit", error=f"code={e.code}")
+        raise
+    except Exception as e:
+        get_tracker().error(f"fatal: {e}", exc=e)
+        get_tracker().run_end(status="failed", error=str(e))
+        raise
+    finally:
+        get_tracker().close()

@@ -1,0 +1,12 @@
+run,run_dir,phase,model,dataset,source_dataset,eval_dataset,class,AP50,AP75,TP,FP,FN,Precision,Recall,F1,total_instances
+repo_class_wise,/home/z/my-project/minor-project/saves/class_wise_results_yolo11_visdrone.csv,post_train,yolo11,visdrone,,visdrone,pedestrian,0.358,0.175,3706,5355,5138,0.409,0.419,0.414,8844
+repo_class_wise,/home/z/my-project/minor-project/saves/class_wise_results_yolo11_visdrone.csv,post_train,yolo11,visdrone,,visdrone,people,0.32,0.135,1584,1779,3541,0.471,0.309,0.373,5125
+repo_class_wise,/home/z/my-project/minor-project/saves/class_wise_results_yolo11_visdrone.csv,post_train,yolo11,visdrone,,visdrone,bicycle,0.0736,0.032,151,652,1136,0.188,0.117,0.144,1287
+repo_class_wise,/home/z/my-project/minor-project/saves/class_wise_results_yolo11_visdrone.csv,post_train,yolo11,visdrone,,visdrone,car,0.77,0.572,11406,7926,2658,0.59,0.811,0.683,14064
+repo_class_wise,/home/z/my-project/minor-project/saves/class_wise_results_yolo11_visdrone.csv,post_train,yolo11,visdrone,,visdrone,van,0.324,0.242,620,892,1355,0.41,0.314,0.356,1975
+repo_class_wise,/home/z/my-project/minor-project/saves/class_wise_results_yolo11_visdrone.csv,post_train,yolo11,visdrone,,visdrone,truck,0.253,0.176,200,272,550,0.424,0.267,0.328,750
+repo_class_wise,/home/z/my-project/minor-project/saves/class_wise_results_yolo11_visdrone.csv,post_train,yolo11,visdrone,,visdrone,tricycle,0.169,0.107,215,453,830,0.322,0.206,0.251,1045
+repo_class_wise,/home/z/my-project/minor-project/saves/class_wise_results_yolo11_visdrone.csv,post_train,yolo11,visdrone,,visdrone,awning-tricycle,0.0827,0.0563,65,296,467,0.18,0.122,0.145,532
+repo_class_wise,/home/z/my-project/minor-project/saves/class_wise_results_yolo11_visdrone.csv,post_train,yolo11,visdrone,,visdrone,bus,0.385,0.271,88,71,163,0.552,0.351,0.429,251
+repo_class_wise,/home/z/my-project/minor-project/saves/class_wise_results_yolo11_visdrone.csv,post_train,yolo11,visdrone,,visdrone,motor,0.412,0.209,2453,3401,2433,0.419,0.502,0.457,4886
+repo_class_wise,/home/z/my-project/minor-project/saves/class_wise_results_yolo11_visdrone.csv,post_train,yolo11,visdrone,,visdrone,ALL (Mean),0.315,0.197,20478,21097,18281,0.397,0.342,0.368,38759

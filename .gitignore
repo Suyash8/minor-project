@@ -36,3 +36,17 @@ __pycache__/
 venv/
 .venv/
 .pytest_cache/
+# --- Run artifacts (logging/tracking/archiving upgrade) --------------------
+# Per-run logs & structured tracking (regenerated on every run, never commit)
+run_logs/
+**/run_logs/
+
+# Archives produced by scripts/archive_results.py
+archives/
+
+# Regenerable plot images inside result runs (metric JSON/CSV are kept)
+results/**/plots/
+saves/results/**/plots/
+
+# Colab / local scratch
+/cross_eval_*/

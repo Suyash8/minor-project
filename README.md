@@ -117,3 +117,32 @@ Open [colab_runner.ipynb](file:///home/illionar/Projects/minor-project/colab_run
 | | `Aspect Ratio Fit` | $R^2$ and Pearson correlation for width-to-height ratio preservation. |
 | **Operational** | `FPS` & `Latency` | Inference throughput and per-image latency (ms). |
 | | `Parameters (M)` | Model size in millions of trainable weights. |
+
+---
+
+## Logging, Run Tracking & Result Exports
+
+Every run (pipeline and cross-dataset evaluation) automatically writes three
+forensic files under `<results_dir>/run_logs/<run_id>/`:
+
+- `console.log` — a complete mirror of all console output,
+- `events.jsonl` — structured events (`run_start`, `stage_start/end`,
+  `job_start/end` per model×dataset with metrics and durations, `error`,
+  `run_end`), so you can reconstruct exactly what happened at every minute,
+- `run_config.json` — an immutable snapshot of the run's exact configuration.
+
+Additional tooling:
+
+```bash
+# Cross-dataset evaluation (no training): every trained checkpoint on every dataset
+python scripts/cross_dataset_eval.py --data-dir ... --weights-dir ... \
+    --results-dir ... --run-name cross_eval_20ep --device cuda --match-mode common
+
+# Consolidate ALL results (incl. cross-dataset) into excel-ready master CSVs
+python scripts/export_results.py --extra-dirs <path-to-cross-eval-run>
+
+# Compress old run folders into archives/ to keep the repo GitHub-friendly
+python scripts/archive_results.py --dry-run
+```
+
+Full documentation: [docs/RESULTS_AND_LOGGING.md](docs/RESULTS_AND_LOGGING.md).

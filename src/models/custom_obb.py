@@ -219,9 +219,9 @@ class CustomOBBDetector(BaseOBBDetector):
                     y_indices, x_indices = torch.where(mask)
                     scores = score_map[y_indices, x_indices].cpu().numpy()
 
-                    # Limit candidates to top 20
-                    if len(scores) > 20:
-                        top_inds = np.argpartition(-scores, 20)[:20]
+                    # Limit candidates to top 100 (dense scenes: 40+ objects/image)
+                    if len(scores) > 100:
+                        top_inds = np.argpartition(-scores, 100)[:100]
                         y_indices = y_indices[top_inds]
                         x_indices = x_indices[top_inds]
                         scores = scores[top_inds]

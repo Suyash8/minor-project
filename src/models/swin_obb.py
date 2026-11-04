@@ -209,8 +209,8 @@ class SwinOBBDetector(BaseOBBDetector):
                     cand_indices = torch.where(mask)[0]
                     scores = score_map[cand_indices].cpu().numpy()
 
-                    if len(scores) > 25:
-                        top = np.argpartition(-scores, 25)[:25]
+                    if len(scores) > 100:
+                        top = np.argpartition(-scores, 100)[:100]
                         cand_indices = cand_indices[top]
                         scores = scores[top]
 

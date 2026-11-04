@@ -217,9 +217,10 @@ class STDDetector(BaseOBBDetector):
                     cand_indices = torch.where(mask)[0]
                     scores = score_map[cand_indices].cpu().numpy()
 
-                    # Keep top candidates
-                    if len(scores) > 25:
-                        top = np.argpartition(-scores, 25)[:25]
+                    # Keep top candidates (dense CODrone scenes hold 40+ objects
+                    # of one class per image; a 25-per-class cap truncates recall)
+                    if len(scores) > 100:
+                        top = np.argpartition(-scores, 100)[:100]
                         cand_indices = cand_indices[top]
                         scores = scores[top]
 

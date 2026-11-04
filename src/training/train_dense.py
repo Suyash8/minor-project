@@ -95,8 +95,18 @@ class OBBMaskLoss(nn.Module):
             F.mse_loss(pred_cos, tgt_cos, reduction="none") * obj_mask
         ).sum() / num_objs
 
-        # Objectness presence loss
-        obj_loss = F.binary_cross_entropy_with_logits(reg_preds[:, 6:7], obj_mask)
+        # Objectness presence loss (pos-weighted).
+        # Dense grids are ~97% negative cells; an unweighted BCE makes
+        # "predict nothing everywhere" the cheapest solution, which collapses
+        # recall to ~0 (observed: ~0.1 boxes/image at conf 0.25). Weight the
+        # positive term by the neg/pos ratio (capped) so detecting objects
+        # is actually rewarded.
+        neg_mask = 1.0 - obj_mask
+        num_pos = obj_mask.sum()
+        num_neg = neg_mask.sum()
+        pos_w = (num_neg / num_pos.clamp(min=1.0)).clamp(max=100.0)
+        obj_bce = F.binary_cross_entropy_with_logits(reg_preds[:, 6:7], obj_mask, reduction="none")
+        obj_loss = (obj_bce * (obj_mask * pos_w + neg_mask)).sum() / (num_pos * pos_w + num_neg).clamp(min=1.0)
 
         total_loss = cls_loss + 2.0 * center_loss + 1.5 * dim_loss + 2.5 * angle_loss + obj_loss
 

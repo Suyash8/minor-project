@@ -189,8 +189,8 @@ class LSKNetDetector(BaseOBBDetector):
                     y_inds, x_inds = torch.where(mask)
                     scores = score_map[y_inds, x_inds].cpu().numpy()
 
-                    if len(scores) > 25:
-                        top = np.argpartition(-scores, 25)[:25]
+                    if len(scores) > 100:
+                        top = np.argpartition(-scores, 100)[:100]
                         y_inds = y_inds[top]
                         x_inds = x_inds[top]
                         scores = scores[top]

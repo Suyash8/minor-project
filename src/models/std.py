@@ -233,11 +233,14 @@ class STDDetector(BaseOBBDetector):
 
                         cx = (float(px) + 0.5 + float(dxy[0])) * stride * (orig_w / target_size)
                         cy = (float(py) + 0.5 + float(dxy[1])) * stride * (orig_h / target_size)
-                        bw = math.exp(float(np.clip(dwh[0], -2.0, 3.0))) * stride * 2.5 * (orig_w / target_size)
-                        bh = math.exp(float(np.clip(dwh[1], -2.0, 3.0))) * stride * 5.0 * (orig_h / target_size)
+                        # NOTE: training encodes log_w = log(w / (stride*3.0)),
+                        # log_h = log(h / (stride*6.0)) (train_dense.py) -> keep priors in sync.
+                        bw = math.exp(float(np.clip(dwh[0], -2.0, 3.0))) * stride * 3.0 * (orig_w / target_size)
+                        bh = math.exp(float(np.clip(dwh[1], -2.0, 3.0))) * stride * 6.0 * (orig_h / target_size)
 
                         sin_a, cos_a = float(dang[0]), float(dang[1])
-                        ang_rad = math.atan2(sin_a, cos_a)
+                        # NOTE: training stores sin(2*theta), cos(2*theta) -> halve atan2 to recover theta.
+                        ang_rad = math.atan2(sin_a, cos_a) / 2.0
                         ang_deg = math.degrees(ang_rad) % 180.0
 
                         boxes.append([cx, cy, bw, bh, ang_deg])

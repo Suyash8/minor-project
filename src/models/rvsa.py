@@ -202,11 +202,13 @@ class RVSADetector(BaseOBBDetector):
 
                         cx = (float(px) + 0.5 + float(reg[0])) * stride * (orig_w / target_size)
                         cy = (float(py) + 0.5 + float(reg[1])) * stride * (orig_h / target_size)
-                        bw = math.exp(float(np.clip(reg[2], -2.0, 3.0))) * stride * 2.5 * (orig_w / target_size)
-                        bh = math.exp(float(np.clip(reg[3], -2.0, 3.0))) * stride * 5.0 * (orig_h / target_size)
+                        # Keep scale priors in sync with train_dense.py (stride*3.0 / stride*6.0).
+                        bw = math.exp(float(np.clip(reg[2], -2.0, 3.0))) * stride * 3.0 * (orig_w / target_size)
+                        bh = math.exp(float(np.clip(reg[3], -2.0, 3.0))) * stride * 6.0 * (orig_h / target_size)
 
                         sin_a, cos_a = float(reg[4]), float(reg[5])
-                        ang_rad = math.atan2(sin_a, cos_a)
+                        # Training stores sin(2*theta), cos(2*theta) -> halve to recover theta.
+                        ang_rad = math.atan2(sin_a, cos_a) / 2.0
                         ang_deg = math.degrees(ang_rad) % 180.0
 
                         boxes.append([cx, cy, bw, bh, ang_deg])

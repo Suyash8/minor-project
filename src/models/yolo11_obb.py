@@ -251,11 +251,13 @@ class YOLO11OBBDetector(BaseOBBDetector):
                         reg = reg_out[b_idx, :, y_idx, x_idx].cpu().numpy()
                         cx = (float(x_idx) + 0.5 + float(reg[0])) * stride * (orig_w / target_size)
                         cy = (float(y_idx) + 0.5 + float(reg[1])) * stride * (orig_h / target_size)
-                        bw = math.exp(float(np.clip(reg[2], -2.0, 3.0))) * stride * 2.5 * (orig_w / target_size)
-                        bh = math.exp(float(np.clip(reg[3], -2.0, 3.0))) * stride * 5.0 * (orig_h / target_size)
+                        # Keep scale priors in sync with train_dense.py (stride*3.0 / stride*6.0).
+                        bw = math.exp(float(np.clip(reg[2], -2.0, 3.0))) * stride * 3.0 * (orig_w / target_size)
+                        bh = math.exp(float(np.clip(reg[3], -2.0, 3.0))) * stride * 6.0 * (orig_h / target_size)
 
                         sin_a, cos_a = float(reg[4]), float(reg[5])
-                        ang_deg = math.degrees(math.atan2(sin_a, cos_a)) % 180.0
+                        # Training stores sin(2*theta), cos(2*theta) -> halve to recover theta.
+                        ang_deg = math.degrees(math.atan2(sin_a, cos_a) / 2.0) % 180.0
 
                         boxes.append([cx, cy, bw, bh, ang_deg])
 

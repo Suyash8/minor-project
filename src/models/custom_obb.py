@@ -239,7 +239,8 @@ class CustomOBBDetector(BaseOBBDetector):
                         # Angle from sin, cos
                         sin_a = float(reg[4])
                         cos_a = float(reg[5])
-                        angle_rad = math.atan2(sin_a, cos_a)
+                        # Training stores sin(2*theta), cos(2*theta) -> halve to recover theta.
+                        angle_rad = math.atan2(sin_a, cos_a) / 2.0
                         angle_deg = math.degrees(angle_rad) % 180.0
 
                         boxes.append([cx, cy, bw, bh, angle_deg])

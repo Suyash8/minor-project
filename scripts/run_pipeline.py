@@ -344,9 +344,20 @@ def run_single_evaluation(
     sample_idx = 0
     batch_idx = 0
 
+    # Throttled hardware housekeeping: the original loop called
+    # dynamic_tune_batch_size() + check_memory_pressure(auto_clean=True) on
+    # EVERY batch. On Colab RAM sits near the warning threshold, so
+    # deep_cleanup_memory() (gc + torch.cuda.empty_cache()) ran per batch,
+    # flushing the CUDA caching allocator and cutting throughput 3-5x.
+    # Evaluation is memory-stable (no gradients), periodic checks suffice.
+    housekeep_every = 25
+    progress_every_s = 30.0
+    last_progress_t = 0.0
+    mem_status = {"status": "normal", "should_throttle": False}
+
     while sample_idx < num_samples:
-        # Dynamic Hardware-Guided Utilization Optimization
-        if not is_test:
+        # Dynamic Hardware-Guided Utilization Optimization (periodic)
+        if batch_idx % housekeep_every == 0 and not is_test:
             new_bs, reason = dynamic_tune_batch_size(
                 current_batch_size=current_batch_size,
                 device=device,
@@ -358,14 +369,14 @@ def run_single_evaluation(
                 current_batch_size = new_bs
                 total_batches = (num_samples + current_batch_size - 1) // current_batch_size
 
-        mem_status = check_memory_pressure(critical_ram_gb=1.0, max_usage_pct=90.0, auto_clean=True)
-        if mem_status["should_throttle"] and current_batch_size > 1:
-            current_batch_size = max(1, current_batch_size // 2)
-            print(
-                f"    [RAM Guard] High memory pressure ({mem_status['available_gb']:.2f} GB free, "
-                f"{mem_status['usage_pct']:.1f}% used). Throttled batch size to {current_batch_size}.",
-                file=sys.stderr,
-            )
+            mem_status = check_memory_pressure(critical_ram_gb=1.0, max_usage_pct=90.0, auto_clean=False)
+            if mem_status["should_throttle"] and current_batch_size > 1:
+                current_batch_size = max(1, current_batch_size // 2)
+                print(
+                    f"    [RAM Guard] High memory pressure ({mem_status['available_gb']:.2f} GB free, "
+                    f"{mem_status['usage_pct']:.1f}% used). Throttled batch size to {current_batch_size}.",
+                    file=sys.stderr,
+                )
 
         end_idx = min(sample_idx + current_batch_size, num_samples)
         batch_imgs = [dataset.get_image(i) for i in range(sample_idx, end_idx)]
@@ -415,9 +426,11 @@ def run_single_evaluation(
             elapsed_seconds=time.time() - start_time,
         )
 
-        # Real-time progress feedback every ~5% of batches or on first/last batch
-        log_interval = max(1, total_batches // 20)
-        if batch_idx % log_interval == 0 or sample_idx == num_samples or batch_idx == 1:
+        # Time-based progress feedback so the console never goes silent for
+        # minutes (old cadence printed every total_batches//20 batches).
+        now = time.time()
+        if (now - last_progress_t) >= progress_every_s or batch_idx == 1 or sample_idx == num_samples:
+            last_progress_t = now
             elapsed = time.time() - start_time
             fps = sample_idx / max(elapsed, 1e-4)
             pct = (sample_idx / num_samples) * 100.0
@@ -427,7 +440,7 @@ def run_single_evaluation(
                 flush=True,
             )
 
-        if mem_status["status"] in ("warning", "recovered"):
+        if batch_idx % housekeep_every == 0 and mem_status["status"] in ("warning", "critical"):
             deep_cleanup_memory()
 
     total_gt_count = sum(sum(len(c.get("boxes", [])) for c in gt) for gt in all_gt)

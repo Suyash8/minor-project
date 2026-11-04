@@ -5,6 +5,8 @@ Exposes a unified interface across all CNN, Vision Transformer, and DETR archite
 
 from __future__ import annotations
 
+import inspect
+
 from typing import Optional, Dict, Type
 from src.models.base import BaseOBBDetector
 from src.models.yolo_obb import YoloOBBDetector
@@ -85,7 +87,21 @@ def get_model(
 
     if m_lower in MODEL_REGISTRY:
         detector_cls = MODEL_REGISTRY[m_lower]
-        detector = detector_cls(model_name=m_lower, device=device, num_classes=num_classes)
+        # Not every wrapper accepts `num_classes` (e.g. YoloOBBDetector wraps
+        # Ultralytics, whose head shape comes from the checkpoint itself).
+        # Passing the kwarg blindly raised:
+        #   TypeError: YoloOBBDetector.__init__() got an unexpected
+        #              keyword argument 'num_classes'
+        init_params = inspect.signature(detector_cls.__init__).parameters
+        accepts_num_classes = (
+            "num_classes" in init_params
+            or any(p.kind is inspect.Parameter.VAR_KEYWORD
+                   for p in init_params.values())
+        )
+        ctor_kwargs = {"model_name": m_lower, "device": device}
+        if accepts_num_classes:
+            ctor_kwargs["num_classes"] = num_classes
+        detector = detector_cls(**ctor_kwargs)
     elif "yolo11" in m_lower:
         detector = YOLO11OBBDetector(model_name=m_lower, device=device, num_classes=num_classes)
     elif "yolo" in m_lower:

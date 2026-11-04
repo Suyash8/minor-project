@@ -50,3 +50,7 @@ saves/results/**/plots/
 
 # Colab / local scratch
 /cross_eval_*/
+
+# Patch files delivered outside the repo should not be committed to it
+/*.patch
+/diagnose_report.json

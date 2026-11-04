@@ -138,3 +138,54 @@ python scripts/archive_results.py --dry-run          # preview
 python scripts/archive_results.py --keep-essentials  # archive test/smoke runs
 python scripts/archive_results.py --restore archives/<name>.tar.gz
 ```
+
+---
+
+## 5. Evaluation forensics: `scripts/diagnose_data.py`
+
+Before trusting any cross-dataset number (especially a surprising ~0), run the
+one-shot diagnostic. It is CPU-only, takes a few minutes, and definitively
+answers "is it the data, the harness, or the model?" without retraining:
+
+```bash
+python scripts/diagnose_data.py \
+    --data-dir    /content/drive/MyDrive/object-detection/data \
+    --weights-dir /content/drive/MyDrive/object-detection/weights
+```
+
+It performs three independent checks:
+
+1. **Data** — val labels discovered/parsed per class, unrecognized annotation
+   class names, ignored-region counts, and a bounds check that flags
+   label-vs-image resolution mismatches (>5% boxes outside the real image
+   means every IoU is destroyed and all models will score ~0).
+2. **Harness** — feeds the ground truth through the exact remap + metric path
+   of `cross_dataset_eval.py` as if it came from a perfect model. Every
+   (source, eval) pair must score mAP50 ~= 1.0; if it does, any near-zero
+   result in a real run is the model, not the code.
+3. **Checkpoints** — loads every checkpoint into its architecture and reports
+   missing/unexpected state-dict keys (a silent `strict=False` mismatch would
+   mean the "trained" model was partially random) plus the epoch and
+   first-vs-last val loss stored inside the checkpoint (did training even
+   converge?).
+
+Exit code 0 = all clear. A machine-readable `diagnose_report.json` is written
+next to the data directory.
+
+### Cross-dataset evaluation notes (post-fix)
+
+- **In-distribution pairs now use an identity class map.** Previously the
+  synonym table merged classes a dataset itself distinguishes (VisDrone
+  `people`->`pedestrian`, CODrone `van`->`car`/`bus`->`truck`), shrinking the
+  evaluated class set (12->10 / 10->6) and making in-dist rows incomparable
+  with `run_pipeline.py`. Cross-dataset pairs still use synonym remapping.
+- **Every summary row now records** `total_pred_boxes`,
+  `gt_boxes_per_class`, `pred_boxes_per_class` — a pair with P=0, R=0 and
+  zero GT boxes for the evaluated classes is a label problem, not a model
+  problem, and the console now says so explicitly.
+- Eval loops throttle hardware housekeeping (batch tuning / memory checks /
+  `torch.cuda.empty_cache`) to every 25 batches and print progress every
+  ~30 seconds; per-batch `empty_cache()` on Colab cost 3-5x throughput.
+- Eval dataset instances are cached across jobs (the loader's directory
+  discovery — including any bundled-annotation auto-extraction — runs once
+  per dataset per run instead of once per model).

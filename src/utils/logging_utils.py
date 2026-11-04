@@ -43,6 +43,7 @@ import sys
 import threading
 import time
 import traceback
+from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -112,7 +113,13 @@ class RunTracker:
         self._lock = threading.Lock()
         self._t0 = time.time()
         self._stage_t0: Dict[str, float] = {}
-        self._job_t0: Dict[str, float] = {}
+        # Job start-times are kept as FIFO queues keyed ONLY by (model, dataset).
+        # The previous implementation built the key from all **tags, so any
+        # extra kwarg passed only to job_end (e.g. weights=...) produced a
+        # different key, the pop() missed, and every job logged
+        # duration_s: -0.0 (time.time() - time.time()). Queue semantics also
+        # tolerate interleaved jobs of the same (model, dataset).
+        self._job_t0: Dict[str, "deque[float]"] = {}
         self._counters: Dict[str, int] = {}
         if events_path is not None:
             try:
@@ -175,15 +182,19 @@ class RunTracker:
     # -- jobs (a job = one model x dataset unit of work) -----------------------
     def job_start(self, model: Optional[str] = None, dataset: Optional[str] = None,
                   **tags):
-        key = self._job_key(model, dataset, tags)
-        self._job_t0[key] = time.time()
+        key = self._job_key(model, dataset)
+        self._job_t0.setdefault(key, deque()).append(time.time())
         self._write("job_start", model=model, dataset=dataset, **tags)
 
     def job_end(self, model: Optional[str] = None, dataset: Optional[str] = None,
                 status: str = "ok", metrics: Optional[Dict[str, Any]] = None,
                 error: Optional[str] = None, **tags):
-        key = self._job_key(model, dataset, tags)
-        dur = time.time() - self._job_t0.pop(key, time.time())
+        key = self._job_key(model, dataset)
+        dq = self._job_t0.get(key)
+        start_t = dq.popleft() if dq else time.time()
+        if dq is not None and not dq:
+            self._job_t0.pop(key, None)
+        dur = time.time() - start_t
         self._write("job_end", model=model, dataset=dataset, status=status,
                     duration_s=round(dur, 2), metrics=_sanitize(metrics),
                     error=error, **tags)
@@ -215,9 +226,9 @@ class RunTracker:
             self._fh = None
 
     @staticmethod
-    def _job_key(model, dataset, tags) -> str:
-        return "|".join(str(x) for x in (model, dataset,
-                                         tuple(sorted(tags.items()))))
+    def _job_key(model, dataset) -> str:
+        """Timing key: (model, dataset) only — independent of extra event tags."""
+        return f"{model}|{dataset}"
 
 
 def _sanitize(metrics: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:

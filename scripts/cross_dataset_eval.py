@@ -108,6 +108,15 @@ SYNONYMS = {
 
 def build_class_map(src_names, eval_names):
     """Map each source class index -> eval class index (or None if unmapped)."""
+    # In-distribution evaluation (trained on X -> tested on X): the training
+    # and eval class lists are identical, so use identity mapping. Falling
+    # through to the synonym table would MERGE classes the dataset itself
+    # distinguishes (VisDrone: people->pedestrian, van->car,
+    # awning-tricycle->tricycle, bus->truck; CODrone: van->car, bus->truck),
+    # silently shrinking the evaluated class set (CODrone 12->10, VisDrone
+    # 10->6) and making in-dist numbers incomparable with run_pipeline.py.
+    if list(src_names) == list(eval_names):
+        return {i: i for i in range(len(src_names))}
     eval_syn = []
     for e_name in eval_names:
         e_set = set(SYNONYMS.get(e_name, [e_name])) | {e_name}
@@ -202,15 +211,31 @@ def evaluate_pair(model, dataset, src_names, src_to_eval, args, device):
     bs = max(1, args.batch_size or 8)
     start = time.time()
     sample_idx, batch_idx = 0, 0
+    last_progress_t = 0.0
+
+    # -- Throttled hardware housekeeping ---------------------------------------
+    # The original loop called dynamic_tune_batch_size() + check_memory_
+    # pressure(auto_clean=True) on EVERY batch. Colab RAM typically sits near
+    # the warning threshold, so deep_cleanup_memory() (gc.collect() +
+    # torch.cuda.empty_cache()) ran per batch, flushing the CUDA caching
+    # allocator and re-serialising every allocation: measured 3-4 FPS instead
+    # of 15-25 FPS. Evaluation is memory-stable (no gradients accumulate), so
+    # a periodic check is sufficient safety.
+    housekeep_every = 25
+    progress_every_s = 30.0
+    mem = {"status": "normal", "should_throttle": False}
 
     while sample_idx < n_samples:
-        if device.startswith("cuda"):
-            new_bs, _ = dynamic_tune_batch_size(bs, device, 1, 32)
-            if new_bs != bs:
-                bs = new_bs
-        mem = check_memory_pressure(critical_ram_gb=1.0, max_usage_pct=90.0, auto_clean=True)
-        if mem.get("should_throttle") and bs > 1:
-            bs = max(1, bs // 2)
+        if batch_idx % housekeep_every == 0:
+            if device.startswith("cuda"):
+                new_bs, _ = dynamic_tune_batch_size(bs, device, 1, 32)
+                if new_bs != bs:
+                    print(f"        [Auto-Tune] batch size {bs} -> {new_bs}", flush=True)
+                    bs = new_bs
+            mem = check_memory_pressure(critical_ram_gb=1.0, max_usage_pct=90.0,
+                                        auto_clean=False)
+            if mem.get("should_throttle") and bs > 1:
+                bs = max(1, bs // 2)
 
         end = min(sample_idx + bs, n_samples)
         imgs = [dataset.get_image(i) for i in range(sample_idx, end)]
@@ -255,11 +280,16 @@ def evaluate_pair(model, dataset, src_names, src_to_eval, args, device):
 
         sample_idx = end
         batch_idx += 1
-        if batch_idx % max(1, (n_samples // 20)) == 0 or sample_idx == n_samples or batch_idx == 1:
-            el = time.time() - start
+        # Time-based progress so the console never goes silent for minutes
+        # (the old cadence printed every n_samples//20 batches = ~800 images
+        # on CODrone, i.e. a 4-5 minute silent gap that looked like a hang).
+        now = time.time()
+        if (now - last_progress_t) >= progress_every_s or sample_idx == n_samples or batch_idx == 1:
+            last_progress_t = now
+            el = now - start
             print(f"        {sample_idx}/{n_samples} ({100.0*sample_idx/n_samples:.1f}%) "
                   f"| {sample_idx/max(el,1e-4):.1f} FPS | elapsed {el:.0f}s", flush=True)
-        if mem.get("status") in ("warning", "recovered"):
+        if batch_idx % housekeep_every == 0 and mem.get("status") in ("warning", "critical"):
             deep_cleanup_memory()
 
     def _count_gt(seq):
@@ -271,6 +301,17 @@ def evaluate_pair(model, dataset, src_names, src_to_eval, args, device):
         return n
 
     total_gt = sum(_count_gt(g if isinstance(g, list) else list(g.values())) for g in all_gt)
+    total_pred = sum(_count_gt(p if isinstance(p, list) else list(p.values())) for p in all_preds)
+
+    # Per-evaluated-class GT / prediction box counts (diagnostics: a class
+    # with zero GT boxes means label parsing or class mapping problems, not a
+    # bad model — this makes such cases self-explanatory in the summary CSV).
+    n_eval_classes_out = len(mapped_targets) if common_mode else n_eval
+    gt_per_class, pred_per_class = [], []
+    for c in range(n_eval_classes_out):
+        gt_per_class.append(sum(len(_boxes_of(g[c] if c < len(g) else None)) for g in all_gt))
+        pred_per_class.append(sum(len(_boxes_of(p[c] if c < len(p) else None)) for p in all_preds))
+
     map_res = compute_map_metrics(all_gt, all_preds, dataset.class_names if not common_mode
                                   else [dataset.class_names[i] for i in mapped_targets])
     cm, cm_labels = compute_detection_confusion_matrix(
@@ -287,7 +328,7 @@ def evaluate_pair(model, dataset, src_names, src_to_eval, args, device):
     else:
         perf = {"fps": 0.0, "mean_latency_ms": 0.0}
     deep_cleanup_memory()
-    return map_res, cls_res, reg_res, perf, total_gt, mapped_targets, n_eval
+    return map_res, cls_res, reg_res, perf, total_gt, total_pred, gt_per_class, pred_per_class, mapped_targets, n_eval
 
 
 def sanitize(v):
@@ -364,6 +405,22 @@ def main():
 
     rows = []
     t0 = time.time()
+    # -- Eval-dataset instance cache -------------------------------------------
+    # AerialOBBDataset construction performs directory discovery (and possibly
+    # a full recursive Drive scan / bundled-zip extraction, which can take
+    # minutes on Colab). Previously one instance was built per (job, eval
+    # dataset) pair = up to 60+ rebuilds per run; the loader is read-only, so
+    # one shared instance per dataset serves every job safely.
+    dataset_cache = {}
+
+    def get_eval_dataset(name):
+        key = (name, args.max_samples)
+        if key not in dataset_cache:
+            dataset_cache[key] = AerialOBBDataset(
+                dataset_name=name, data_dir=data_dir,
+                split="val", max_samples=args.max_samples)
+        return dataset_cache[key]
+
     for model, src, weights_path in jobs:
         src_names = list(DATASET_CLASSES[src])
         for eval_ds in eval_datasets:
@@ -383,8 +440,7 @@ def main():
             tracker.job_start(model=model, dataset=eval_ds, source=src,
                               phase="cross_eval")
             try:
-                dataset = AerialOBBDataset(dataset_name=eval_ds, data_dir=data_dir,
-                                           split="val", max_samples=args.max_samples)
+                dataset = get_eval_dataset(eval_ds)
             except Exception as e:
                 print(f"  [!] Dataset '{eval_ds}' unavailable ({e}). Skipping.")
                 tracker.job_end(model=model, dataset=eval_ds, source=src,
@@ -398,9 +454,12 @@ def main():
 
             src_to_eval = build_class_map(src_names, dataset.class_names)
             n_mapped = sum(1 for v in src_to_eval.values() if v is not None)
+            identity_note = ("  [in-distribution: identity class map]"
+                              if list(src_names) == list(dataset.class_names) else "")
             print(f"  class mapping ({args.match_mode} mode): "
                   f"{n_mapped}/{len(src_names)} source classes mapped -> "
-                  f"{len(set(v for v in src_to_eval.values() if v is not None))} eval classes")
+                  f"{len(set(v for v in src_to_eval.values() if v is not None))} eval classes"
+                  f"{identity_note}")
 
             try:
                 model_obj = get_model(model, device=device,
@@ -417,7 +476,8 @@ def main():
                 continue
 
             try:
-                map_res, cls_res, reg_res, perf, total_gt, mapped_targets, n_eval = \
+                (map_res, cls_res, reg_res, perf, total_gt, total_pred,
+                 gt_per_class, pred_per_class, mapped_targets, n_eval) = \
                     evaluate_pair(model_obj, dataset, src_names, src_to_eval, args, device)
             except Exception as e:
                 print(f"  [!] Evaluation failed: {e}")
@@ -436,6 +496,7 @@ def main():
                 "evaluated_classes": len(mapped_targets) if args.match_mode == "common" else n_eval,
                 "total_eval_classes": n_eval,
                 "total_gt_boxes": total_gt,
+                "total_pred_boxes": total_pred,
                 "map50": sanitize(map_res["map50"]),
                 "map75": sanitize(map_res["map75"]),
                 "map50_95": sanitize(map_res["map50_95"]),
@@ -458,6 +519,31 @@ def main():
                 "fps": sanitize(perf["fps"]),
                 "mean_latency_ms": sanitize(perf["mean_latency_ms"]),
             }
+
+            # -- Forensic diagnostics: distinguish "bad model" from
+            #    "broken labels / class mapping". A pair with P=0, R=0 and
+            #    zero GT boxes is a data problem, not a model problem.
+            diag_names = (dataset.class_names if args.match_mode == "all"
+                          else [dataset.class_names[i] for i in mapped_targets])
+            summary["gt_boxes_per_class"] = {
+                diag_names[c]: int(gt_per_class[c]) for c in range(len(diag_names))}
+            summary["pred_boxes_per_class"] = {
+                diag_names[c]: int(pred_per_class[c]) for c in range(len(diag_names))}
+            if total_gt == 0:
+                msg = (f"0 ground-truth boxes parsed across {len(dataset)} '{eval_ds}' "
+                       f"val images for the evaluated classes — metrics are 0 by "
+                       f"construction. Check that val labels exist and use class "
+                       f"names the parser recognises (run scripts/diagnose_data.py).")
+                print(f"  [!!!] {msg}")
+                tracker.error(msg, model=model, dataset=eval_ds)
+            else:
+                zero_gt = [n for n, c in summary["gt_boxes_per_class"].items() if c == 0]
+                if zero_gt:
+                    print(f"  [!] {len(zero_gt)} evaluated classes have 0 GT boxes: "
+                          f"{', '.join(zero_gt)} (their AP is 0 by definition)")
+            if total_pred == 0:
+                print(f"  [!] model produced 0 predictions above conf={args.conf_thresh} "
+                      f"— recall/mAP are 0 by construction.")
             rows.append(summary)
 
             # per-class CSV (feeds the class_wise_results xlsx sheet directly)
@@ -491,7 +577,8 @@ def main():
                                      "recall": summary["recall"],
                                      "angle_mae": summary["angle_mae"],
                                      "fps": summary["fps"],
-                                     "total_gt_boxes": total_gt},
+                                     "total_gt_boxes": total_gt,
+                                     "total_pred_boxes": total_pred},
                             weights=weights_path)
 
     # ---- write summary tables ---------------------------------------------

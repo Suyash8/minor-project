@@ -19,6 +19,7 @@ credentials.json
 */weights/
 */weights-*
 */*.zip
+!assets/*.zip
 *.pt
 *.pth
 
@@ -43,6 +44,7 @@ run_logs/
 
 # Archives produced by scripts/archive_results.py
 archives/
+*.xlsx
 
 # Regenerable plot images inside result runs (metric JSON/CSV are kept)
 results/**/plots/
@@ -54,3 +56,9 @@ saves/results/**/plots/
 # Patch files delivered outside the repo should not be committed to it
 /*.patch
 /diagnose_report.json
+
+# YOLO26 training pipeline artifacts (training/)
+runs/
+**/labels.cache
+/data_cleaned/
+vehicle_obb_data/

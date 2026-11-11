@@ -1,0 +1,9 @@
+# quick pipeline validation (~2-3 min on T4): tiny model, 2 epochs, 640px
+dataset: codrone
+model: yolo26n-obb
+epochs: 2
+imgsz: 640
+batch: 8
+train_kwargs:
+  patience: 5
+  close_mosaic: 0

@@ -1,0 +1,11 @@
+# Merged dataset — YOLO26m (bigger backbone; ~2x train time of s)
+# Use when GPU time allows; typically +1.5..3 mAP50 over yolo26s on dense data
+dataset: all
+model: yolo26m-obb
+epochs: 120
+imgsz: 1280
+batch: -1
+train_kwargs:
+  patience: 25
+  cos_lr: true
+  close_mosaic: 10

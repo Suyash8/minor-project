@@ -1,0 +1,11 @@
+# Merged dataset (codrone+visdrone+dota via dataset_all.yaml) — YOLO26s
+# 19,760 imgs / 1,056,385 boxes in one training set
+dataset: all
+model: yolo26s-obb
+epochs: 120
+imgsz: 1280
+batch: -1
+train_kwargs:
+  patience: 25
+  cos_lr: true
+  close_mosaic: 10

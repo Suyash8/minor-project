@@ -1,0 +1,11 @@
+# CODrone primary run — YOLO26s-OBB, native 1280px
+# CODrone: 9,894 imgs / 416,727 boxes; van is rare (7 instances, source-limited)
+dataset: codrone
+model: yolo26s-obb
+epochs: 150
+imgsz: 1280
+batch: -1            # autobatch: fits T4 / L4 / A100 automatically
+train_kwargs:
+  patience: 30
+  cos_lr: true
+  close_mosaic: 10

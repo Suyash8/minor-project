@@ -1,0 +1,12 @@
+# DOTA primary run — YOLO26s-OBB, native 1280px
+# DOTA: 1,233 imgs / 193,073 boxes; aerial, higher altitude, denser small boxes.
+# Fewer images -> converges faster; 120 epochs is enough.
+dataset: dota
+model: yolo26s-obb
+epochs: 120
+imgsz: 1280
+batch: -1
+train_kwargs:
+  patience: 25
+  cos_lr: true
+  close_mosaic: 10

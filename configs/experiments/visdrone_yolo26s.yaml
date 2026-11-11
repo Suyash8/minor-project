@@ -1,0 +1,11 @@
+# VisDrone primary run — YOLO26s-OBB, native 1280px
+# VisDrone: 8,633 imgs / 446,585 boxes; all 8 classes healthy
+dataset: visdrone
+model: yolo26s-obb
+epochs: 150
+imgsz: 1280
+batch: -1
+train_kwargs:
+  patience: 30
+  cos_lr: true
+  close_mosaic: 10

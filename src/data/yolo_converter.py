@@ -18,7 +18,40 @@ import numpy as np
 from PIL import Image
 import yaml
 
-from src.config import DATASET_CLASSES, DEFAULT_DATA_DIR, DATASET_STATIC_PATHS
+from src.config import DATASET_CLASSES, DEFAULT_DATA_DIR, DATASET_STATIC_PATHS, CLEANED_DATASET_CLASSES
+
+
+def _static_entry(ds: str, split: str) -> Dict[str, Optional[str]]:
+    """First existing layout from DATASET_STATIC_PATHS (list or legacy dict)."""
+    info = DATASET_STATIC_PATHS.get(ds, {}).get(split, {})
+    layouts = info if isinstance(info, list) else [info]
+    return next((e for e in layouts if e.get("images")), {})
+
+
+def _cleaned_yaml_if_present(ds_dir: Path, ds: str, out_yaml: Path) -> Optional[Path]:
+    """If `ds_dir` is already a cleaned v4.1 dataset ({split}/labels in
+    YOLO-OBB format, unified 8 classes), emit a pass-through Ultralytics
+    dataset.yaml instead of converting raw formats. Returns the yaml path,
+    or None when the directory is not a cleaned build (caller falls back to
+    the raw-format conversion)."""
+    cleaned = all(
+        (ds_dir / sp / "images").is_dir() and any((ds_dir / sp / "labels").glob("*.txt"))
+        for sp in ("train", "val")
+    )
+    if not cleaned:
+        return None
+    classes = CLEANED_DATASET_CLASSES[ds]
+    yaml_dict = {
+        "path": str(ds_dir),
+        "train": "train/images",
+        "val": "val/images",
+        "test": "test/images" if (ds_dir / "test" / "images").is_dir() else "val/images",
+        "names": {i: c for i, c in enumerate(classes)},
+    }
+    with open(out_yaml, "w", encoding="utf-8") as f:
+        yaml.safe_dump(yaml_dict, f, sort_keys=False)
+    print(f"[✓] {ds}: cleaned v4.1 dataset detected — using labels as-is (no re-conversion)")
+    return out_yaml
 
 
 def normalize_box_corners(pts: np.ndarray, img_w: int, img_h: int) -> np.ndarray:
@@ -62,6 +95,12 @@ def convert_visdrone_to_yolo_obb(visdrone_dir: Path) -> Path:
 
     out_yaml = visdrone_dir / "visdrone_yolo_obb.yaml"
 
+    # Cleaned v4.1 build: labels are already YOLO-OBB in the unified 8-class
+    # space — pass through instead of re-converting raw VisDrone CSVs.
+    cleaned = _cleaned_yaml_if_present(visdrone_dir, "visdrone", out_yaml)
+    if cleaned is not None:
+        return cleaned
+
     # Auto-extract bundled annotations if missing
     train_ann = visdrone_dir / "VisDrone2019-DET-train" / "annotations"
     val_ann = visdrone_dir / "VisDrone2019-DET-val" / "annotations"
@@ -77,7 +116,7 @@ def convert_visdrone_to_yolo_obb(visdrone_dir: Path) -> Path:
             print(f"[✓] VisDrone annotations extracted successfully.")
 
     for split in ["train", "val"]:
-        static_p = DATASET_STATIC_PATHS["visdrone"].get(split, {})
+        static_p = _static_entry("visdrone", split)
         direct_img = (visdrone_dir / static_p["images"]) if static_p.get("images") else None
         direct_ann = (visdrone_dir / static_p["labels"]) if static_p.get("labels") else None
 
@@ -197,11 +236,11 @@ def convert_visdrone_to_yolo_obb(visdrone_dir: Path) -> Path:
                 pass
 
     # Generate dataset YAML for Ultralytics
-    train_rel = DATASET_STATIC_PATHS["visdrone"]["train"]["images"]
+    train_rel = _static_entry("visdrone", "train").get("images", "train/images")
     if not (visdrone_dir / train_rel).exists() and (visdrone_dir / "images" / "train").exists():
         train_rel = "images/train"
 
-    val_rel = DATASET_STATIC_PATHS["visdrone"]["val"]["images"]
+    val_rel = _static_entry("visdrone", "val").get("images", "val/images")
     if not (visdrone_dir / val_rel).exists() and (visdrone_dir / "images" / "val").exists():
         val_rel = "images/val"
 
@@ -227,6 +266,11 @@ def convert_dota_to_yolo_obb(dota_dir: Path) -> Path:
     class_to_idx = {c: i for i, c in enumerate(classes)}
 
     out_yaml = dota_dir / "dota_yolo_obb.yaml"
+
+    # Cleaned v4.1 build: already YOLO-OBB, unified 8-class space
+    cleaned = _cleaned_yaml_if_present(dota_dir, "dota", out_yaml)
+    if cleaned is not None:
+        return cleaned
 
     # Auto-extract bundled annotations if missing
     lbl_train = dota_dir / "labels" / "train"
@@ -301,11 +345,11 @@ def convert_dota_to_yolo_obb(dota_dir: Path) -> Path:
             if obb_lines:
                 out_lbl_file.write_text("".join(obb_lines), encoding="utf-8")
 
-    train_rel = DATASET_STATIC_PATHS["dota"]["train"]["images"]
+    train_rel = _static_entry("dota", "train").get("images", "train/images")
     if not (dota_dir / train_rel).exists() and (dota_dir / "images" / "train").exists():
         train_rel = "images/train"
 
-    val_rel = DATASET_STATIC_PATHS["dota"]["val"]["images"]
+    val_rel = _static_entry("dota", "val").get("images", "val/images")
     if not (dota_dir / val_rel).exists() and (dota_dir / "images" / "val").exists():
         val_rel = "images/val"
 
@@ -332,6 +376,11 @@ def convert_codrone_to_yolo_obb(codrone_dir: Path) -> Path:
 
     out_yaml = codrone_dir / "codrone_yolo_obb.yaml"
 
+    # Cleaned v4.1 build: already YOLO-OBB, unified 8-class space
+    cleaned = _cleaned_yaml_if_present(codrone_dir, "codrone", out_yaml)
+    if cleaned is not None:
+        return cleaned
+
     # Auto-extract bundled annotations if missing
     ann_train = codrone_dir / "train" / "annfile"
     ann_val = codrone_dir / "val" / "annfile"
@@ -347,7 +396,7 @@ def convert_codrone_to_yolo_obb(codrone_dir: Path) -> Path:
             print(f"[✓] CODrone annotations extracted successfully.")
 
     for split in ["train", "val"]:
-        static_p = DATASET_STATIC_PATHS["codrone"].get(split, {})
+        static_p = _static_entry("codrone", split)
         direct_img = (codrone_dir / static_p["images"]) if static_p.get("images") else None
         direct_lbl = (codrone_dir / static_p["labels"]) if static_p.get("labels") else None
 
@@ -490,11 +539,11 @@ def convert_codrone_to_yolo_obb(codrone_dir: Path) -> Path:
             if obb_lines:
                 out_lbl_file.write_text("".join(obb_lines), encoding="utf-8")
 
-    train_rel = DATASET_STATIC_PATHS["codrone"]["train"]["images"]
+    train_rel = _static_entry("codrone", "train").get("images", "train/images")
     if not (codrone_dir / train_rel).exists() and (codrone_dir / "images" / "train").exists():
         train_rel = "images/train"
 
-    val_rel = DATASET_STATIC_PATHS["codrone"]["val"]["images"]
+    val_rel = _static_entry("codrone", "val").get("images", "val/images")
     if not (codrone_dir / val_rel).exists() and (codrone_dir / "images" / "val").exists():
         val_rel = "images/val"
 
@@ -514,7 +563,11 @@ def prepare_dataset_for_yolo_training(dataset_name: str, data_dir: Optional[Path
     """
     Ensure dataset is converted and return the path to the YOLO-OBB dataset YAML.
     """
-    base_dir = Path(data_dir or DEFAULT_DATA_DIR) / dataset_name
+    base_dir = Path(data_dir or DEFAULT_DATA_DIR)
+    if base_dir.name == dataset_name.lower():
+        pass  # caller already pointed at the dataset directory itself
+    else:
+        base_dir = base_dir / dataset_name
     d_lower = dataset_name.lower()
 
     if d_lower == "visdrone":

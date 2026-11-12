@@ -14,7 +14,7 @@ from typing import List, Dict, Any, Optional, Tuple
 import numpy as np
 from PIL import Image
 
-from src.config import DATASET_CLASSES, DATASET_STATIC_PATHS
+from src.config import DATASET_CLASSES, DATASET_STATIC_PATHS, CLEANED_DATASET_CLASSES, cleaned_data_root
 
 def polygon_to_obb_params(pts: np.ndarray) -> Tuple[float, float, float, float, float]:
     """
@@ -61,6 +61,14 @@ class AerialOBBDataset:
         self.dataset_name = dataset_name.lower()
         self.data_dir = Path(data_dir) / self.dataset_name
         self.split = split
+        # If the requested data_dir does not actually contain this dataset,
+        # transparently fall back to the cleaned-data root (v4.1 build) so all
+        # engines train on the same data without manual path plumbing.
+        if not self.data_dir.is_dir():
+            cleaned_root = cleaned_data_root()
+            candidate = cleaned_root / self.dataset_name
+            if candidate.is_dir():
+                self.data_dir = candidate
         self.class_names = DATASET_CLASSES.get(self.dataset_name, ["car", "van", "truck", "bus", "pedestrian"])
         self.class_to_idx = {name: i for i, name in enumerate(self.class_names)}
 
@@ -72,13 +80,29 @@ class AerialOBBDataset:
         static_info = DATASET_STATIC_PATHS.get(self.dataset_name, {}).get(self.split)
         img_dir = None
         lbl_dir = None
+        using_cleaned_layout = False
 
         if static_info:
-            direct_img = self.data_dir / static_info["images"]
-            direct_lbl = (self.data_dir / static_info["labels"]) if static_info.get("labels") else None
-            if direct_img.exists() and direct_img.is_dir():
-                img_dir = direct_img
-                lbl_dir = direct_lbl
+            # Static paths may be a priority list (cleaned layout first, raw
+            # fallbacks after) or a legacy single dict entry.
+            layouts = static_info if isinstance(static_info, list) else [static_info]
+            for entry in layouts:
+                direct_img = self.data_dir / entry["images"]
+                direct_lbl = (self.data_dir / entry["labels"]) if entry.get("labels") else None
+                if direct_img.exists() and direct_img.is_dir():
+                    img_dir = direct_img
+                    lbl_dir = direct_lbl
+                    using_cleaned_layout = entry.get("layout") == "cleaned"
+                    break
+
+        if using_cleaned_layout:
+            # The cleaned v4.1 build emits a single unified 8-class space in
+            # YOLO-OBB polygon format; re-target class names so the dense/DETR
+            # engines train on exactly the same labels as the Ultralytics suite.
+            cleaned_names = CLEANED_DATASET_CLASSES.get(self.dataset_name)
+            if cleaned_names:
+                self.class_names = list(cleaned_names)
+                self.class_to_idx = {name: i for i, name in enumerate(self.class_names)}
 
         # Fallback dynamic search if static directory is not found
         if not img_dir:

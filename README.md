@@ -4,18 +4,24 @@ A modular, reproducible research framework for evaluating and analyzing Oriented
 
 ---
 
-## NEW: Cleaned-Data Training Pipeline (YOLO26-OBB)
+## NEW: Cleaned-Data Training Pipeline (ALL models, per-model tuned)
 
 The project now has a complete, end-to-end pipeline built around the three
 cleaned, cross-compatible datasets (CODrone / VisDrone / DOTA → unified
-8-class space) and **Ultralytics YOLO26-OBB**:
+8-class space), with **every architecture tuned for the cleaned data** —
+the full Ultralytics YOLO-OBB suite (YOLOv8 / YOLO11 / YOLO26, n→m scales)
+plus all 11 research architectures (LSKNet, STD, RVSA, Swin-OBB,
+Custom-OBB, native YOLO11-OBB, ARS-DETR, AO2-DETR, RiO-DETR, RHINO,
+OrientedFormer):
 
 ```
 data_cleaning/    clean raw sources -> 3 separated, cross-compatible datasets
                   (discovery, format auto-detection, class unification, MD5
                   dedup, 4px filter, 1280px resize, stratified 82/9/9 split)
 training/         train.py / evaluate.py / cross_eval.py / summarize_runs.py
-configs/experiments/   ready-made presets (dataset x model)
+configs/experiments/   ready-made presets (dataset x model, incl. family sweeps)
+src/training/     dense/DETR engines — now read the cleaned layout directly
+                  with per-model optimized defaults (see docs/MODEL_TUNING_GUIDE.md)
 assets/dota_labels_all.zip   the DOTA v1.0+v1.5 label package (reproducibility)
 ```
 
@@ -27,7 +33,23 @@ Quick start (Colab GPU runtime):
 !python training/colab_quickstart.py --cfg configs/experiments/visdrone_yolo26s.yaml
 ```
 
-Full docs: [training/README.md](training/README.md) · [data_cleaning/README.md](data_cleaning/README.md)
+Benchmark all three YOLO generations in one run:
+
+```bash
+!python training/train.py --cfg configs/experiments/visdrone_yolo_family.yaml
+```
+
+Research architectures (dense/DETR) train on the same cleaned data with
+their tuned defaults applied automatically:
+
+```python
+from src.training.dispatcher import train_model
+train_model("lsknet", dataset_name="codrone")   # epochs/LR/imgsz/patience auto-tuned
+```
+
+Full docs: [training/README.md](training/README.md) ·
+[data_cleaning/README.md](data_cleaning/README.md) ·
+[docs/MODEL_TUNING_GUIDE.md](docs/MODEL_TUNING_GUIDE.md)
 
 ---
 
@@ -40,8 +62,8 @@ minor-project/
 ├── colab_runner.ipynb          # 1-Click Google Colab GPU runner
 ├── README.md                   # Comprehensive documentation and usage guide
 ├── data_cleaning/              # NEW: cleaned-dataset build pipeline (v4.1) + EDA tools
-├── training/                   # NEW: YOLO26-OBB training/eval on the cleaned data
-├── configs/experiments/        # NEW: experiment presets (dataset x model)
+├── training/                   # NEW: YOLO-OBB training/eval on the cleaned data (all generations)
+├── configs/experiments/        # NEW: experiment presets (dataset x model, incl. family sweeps)
 ├── scripts/
 │   ├── run_pipeline.py         # Master CLI runner (download -> eval -> metrics -> plots -> report)
 │   ├── download_datasets.py    # Dedicated dataset downloader & manual guide

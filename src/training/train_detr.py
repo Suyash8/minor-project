@@ -276,6 +276,8 @@ def train_detr_model(
     project_dir: Optional[str] = None,
     data_dir: Optional[str] = None,
     max_batches: Optional[int] = None,
+    warmup_epochs: int = 0,
+    patience: Optional[int] = None,
     **kwargs,
 ) -> Dict[str, Any]:
     """
@@ -356,7 +358,24 @@ def train_detr_model(
 
     criterion = DETROBBLoss(num_classes=num_classes).to(dev)
     optimizer = torch.optim.AdamW(net.parameters(), lr=lr, weight_decay=weight_decay)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-6)
+    # Linear LR warmup for the first `warmup_epochs` epochs (stabilizes
+    # Hungarian matching on the 8-class aerial data), then cosine decay.
+    warmup_epochs = max(0, min(int(warmup_epochs), epochs - 1))
+    base_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=max(1, epochs - warmup_epochs), eta_min=1e-6)
+    if warmup_epochs > 0:
+        scheduler = torch.optim.lr_scheduler.SequentialLR(
+            optimizer,
+            schedulers=[
+                torch.optim.lr_scheduler.LinearLR(
+                    optimizer, start_factor=0.01, end_factor=1.0,
+                    total_iters=warmup_epochs),
+                base_scheduler,
+            ],
+            milestones=[warmup_epochs],
+        )
+    else:
+        scheduler = base_scheduler
 
     use_bf16 = False
     if dev.type == "cuda" and hasattr(torch.cuda, "is_bf16_supported") and torch.cuda.is_bf16_supported():
@@ -401,6 +420,7 @@ def train_detr_model(
 
     # 5. Training Loop
     total_train_start = time.time()
+    epochs_since_best = 0
 
     for epoch in range(start_epoch, epochs + 1):
         net.train()
@@ -525,6 +545,16 @@ def train_detr_model(
                 target_copy = drive_save / f"{model_name}_best.pt"
                 if best_weights_path.resolve() != target_copy.resolve():
                     shutil.copy2(best_weights_path, target_copy)
+
+        # Early stopping on validation-loss plateau (patience from
+        # dispatcher MODEL_TUNING; None disables).
+        if patience and not is_best:
+            epochs_since_best += 1
+            if epochs_since_best >= patience:
+                print(f"[!] Early stopping at epoch {epoch}: no val-loss improvement for {patience} epochs")
+                break
+        elif is_best:
+            epochs_since_best = 0
 
     # Save training history JSON
     history_path = save_dir / "train_history.json"

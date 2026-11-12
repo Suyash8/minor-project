@@ -215,49 +215,114 @@ SCALE_THRESHOLDS = {
     "large": (96 ** 2, float("inf")), # > 9216 px^2
 }
 
-# Static deterministic dataset folder paths relative to each dataset directory
-DATASET_STATIC_PATHS: Dict[str, Dict[str, Dict[str, Optional[str]]]] = {
+# Unified 8-class space produced by data_cleaning/clean_build_v4.py (v4.1 splits).
+# All three cleaned datasets (and the merged 'all' set) share exactly this list,
+# so every model trains and cross-evaluates in one label space.
+CLEANED_DATASET_CLASSES: Dict[str, List[str]] = {
+    "codrone": [
+        "pedestrian",
+        "bicycle",
+        "car",
+        "van",
+        "truck",
+        "bus",
+        "tricycle",
+        "motorcyclist",
+    ],
+    "visdrone": [
+        "pedestrian",
+        "bicycle",
+        "car",
+        "van",
+        "truck",
+        "bus",
+        "tricycle",
+        "motorcyclist",
+    ],
+    "dota": [
+        "pedestrian",
+        "bicycle",
+        "car",
+        "van",
+        "truck",
+        "bus",
+        "tricycle",
+        "motorcyclist",
+    ],
+    "all": [
+        "pedestrian",
+        "bicycle",
+        "car",
+        "van",
+        "truck",
+        "bus",
+        "tricycle",
+        "motorcyclist",
+    ],
+}
+
+# Static deterministic dataset folder paths relative to each dataset directory.
+# Each split lists layouts in priority order; the first layout whose images
+# directory exists wins. Layout "cleaned" (v4.1 output:
+# {split}/images + {split}/labels in YOLO-OBB 8-class format) is preferred so
+# the dense/DETR engines train on exactly the same cleaned data as the
+# Ultralytics suite; the raw Drive layouts remain as fallbacks.
+DATASET_STATIC_PATHS: Dict[str, Dict[str, List[Dict[str, Optional[str]]]]] = {
     "codrone": {
-        "val": {
-            "images": "val/images",
-            "labels": "val/annfile",
-        },
-        "train": {
-            "images": "train/images",
-            "labels": "train/annfile",
-        },
-        "test": {
-            "images": "test/images",
-            "labels": "test/annfile",
-        },
+        "val": [
+            {"images": "val/images", "labels": "val/labels", "layout": "cleaned"},
+            {"images": "val/images", "labels": "val/annfile", "layout": "raw"},
+        ],
+        "train": [
+            {"images": "train/images", "labels": "train/labels", "layout": "cleaned"},
+            {"images": "train/images", "labels": "train/annfile", "layout": "raw"},
+        ],
+        "test": [
+            {"images": "test/images", "labels": "test/labels", "layout": "cleaned"},
+            {"images": "test/images", "labels": "test/annfile", "layout": "raw"},
+        ],
     },
     "visdrone": {
-        "val": {
-            "images": "VisDrone2019-DET-val/images",
-            "labels": "VisDrone2019-DET-val/annotations",
-        },
-        "train": {
-            "images": "VisDrone2019-DET-train/images",
-            "labels": "VisDrone2019-DET-train/annotations",
-        },
-        "test": {
-            "images": "VisDrone2019-DET-test-dev/images",
-            "labels": "VisDrone2019-DET-test-dev/annotations",
-        },
+        "val": [
+            {"images": "val/images", "labels": "val/labels", "layout": "cleaned"},
+            {"images": "VisDrone2019-DET-val/images", "labels": "VisDrone2019-DET-val/annotations", "layout": "raw"},
+        ],
+        "train": [
+            {"images": "train/images", "labels": "train/labels", "layout": "cleaned"},
+            {"images": "VisDrone2019-DET-train/images", "labels": "VisDrone2019-DET-train/annotations", "layout": "raw"},
+        ],
+        "test": [
+            {"images": "test/images", "labels": "test/labels", "layout": "cleaned"},
+            {"images": "VisDrone2019-DET-test-dev/images", "labels": "VisDrone2019-DET-test-dev/annotations", "layout": "raw"},
+        ],
     },
     "dota": {
-        "val": {
-            "images": "images/val",
-            "labels": "labels/val",
-        },
-        "train": {
-            "images": "images/train",
-            "labels": "labels/train",
-        },
-        "test": {
-            "images": "images/test",
-            "labels": None,
-        },
+        "val": [
+            {"images": "val/images", "labels": "val/labels", "layout": "cleaned"},
+            {"images": "images/val", "labels": "labels/val", "layout": "raw"},
+        ],
+        "train": [
+            {"images": "train/images", "labels": "train/labels", "layout": "cleaned"},
+            {"images": "images/train", "labels": "labels/train", "layout": "raw"},
+        ],
+        "test": [
+            {"images": "test/images", "labels": "test/labels", "layout": "cleaned"},
+            {"images": "images/test", "labels": None, "layout": "raw"},
+        ],
     },
 }
+
+# Root that contains the cleaned datasets ({codrone,visdrone,dota}/<split>/{images,labels}).
+# Priority: explicit data_dir > $VEHICLE_OBB_DATA > Colab Drive > repo-local data/.
+def cleaned_data_root(explicit: Optional[str] = None) -> Path:
+    import os
+    if explicit:
+        return Path(explicit).expanduser().resolve()
+    env = os.environ.get("VEHICLE_OBB_DATA")
+    if env:
+        return Path(env).expanduser().resolve()
+    drive = Path("/content/drive/MyDrive/object-detection/cleaned_data")
+    if drive.is_dir():
+        return drive
+    return PROJECT_ROOT / "data" / "cleaned_data"
 

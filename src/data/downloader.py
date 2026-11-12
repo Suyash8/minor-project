@@ -137,11 +137,19 @@ def verify_dataset_status(dataset_name: str, data_dir: Path) -> Dict[str, Any]:
     static_splits = DATASET_STATIC_PATHS.get(dataset_name.lower(), {})
     for split in ["val", "test", "train"]:
         count = 0
-        if split in static_splits:
-            rel_img = static_splits[split]["images"]
+        # static entries may be a priority list (cleaned layout first) or a
+        # legacy single dict — try every layout's images dir
+        entry = static_splits.get(split) if isinstance(static_splits, dict) else None
+        layouts = entry if isinstance(entry, list) else ([entry] if entry else [])
+        for lay in layouts:
+            rel_img = lay.get("images")
+            if not rel_img:
+                continue
             static_p = target_dir / rel_img
             if static_p.exists() and static_p.is_dir():
                 count = len([p for p in static_p.iterdir() if p.is_file() and p.suffix.lower() in (".jpg", ".jpeg", ".png", ".bmp")])
+            if count:
+                break
 
         # Dynamic fallback if not found at static path
         if count == 0:

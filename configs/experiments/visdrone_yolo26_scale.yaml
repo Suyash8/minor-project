@@ -1,0 +1,12 @@
+# Scale sweep on VisDrone — YOLO26 nano/small/medium.
+# Answers "how much accuracy does model size buy on the cleaned data".
+# n = fastest iteration; m = upper bound (needs ~2x train time of s).
+dataset: visdrone
+models: [yolo26n-obb, yolo26s-obb, yolo26m-obb]
+epochs: 150
+imgsz: 1280
+batch: -1
+train_kwargs:
+  patience: 30
+  cos_lr: true
+  close_mosaic: 10

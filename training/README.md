@@ -1,8 +1,12 @@
-# Training Pipeline — YOLO26-OBB on the cleaned vehicle datasets
+# Training Pipeline — YOLO-OBB suite on the cleaned vehicle datasets
 
-Trains Ultralytics **YOLO26-OBB** (DOTAv1-pretrained, task-specific OBB head
-with refined angle decoding and STAL small-target label assignment) on the
-cleaned 8-class datasets produced by [`data_cleaning/`](../data_cleaning/).
+Trains the Ultralytics **YOLO-OBB suite** (YOLOv8 / YOLO11 / YOLO26, n→m
+scales; DOTAv1-pretrained, task-specific OBB head with refined angle
+decoding and STAL small-target label assignment) on the cleaned 8-class
+datasets produced by [`data_cleaning/`](../data_cleaning/). The research
+architectures (dense/DETR engines under `src/training/`) train on the same
+cleaned data — see [docs/MODEL_TUNING_GUIDE.md](../docs/MODEL_TUNING_GUIDE.md)
+for their per-model tuned settings.
 
 Classes (identical in every dataset):
 `0 pedestrian · 1 bicycle · 2 car · 3 van · 4 truck · 5 bus · 6 tricycle · 7 motorcyclist`
@@ -63,8 +67,10 @@ use it for extra rotation robustness if you like.
 
 ```
 --datasets codrone|visdrone|dota|all     (multiple allowed)
---models   yolo26n-obb|yolo26s-obb|yolo26m-obb|yolo26l-obb|yolo26x-obb|yolo11*-obb|yolov8*-obb
---cfg      configs/experiments/<preset>.yaml     (CLI args override the file)
+--models   yolo26n-obb|yolo26s-obb|yolo26m-obb|yolo26l-obb|yolo26x-obb|yolo11*-obb|yolov8*-obb (multiple allowed)
+--cfg      configs/experiments/<preset>.yaml     (CLI args override the file;
+                                                  yaml may list several models
+                                                  under `models:` for a sweep)
 --epochs --imgsz --batch --patience --workers --device
 --runs-dir /content/drive/MyDrive/object-detection/runs   (default in Colab: Drive)
 --data-root <cleaned_data root>                          (default: auto)
@@ -103,6 +109,16 @@ Outputs land in the runs dir: `cross_eval.csv/.md/.json`, `summary.csv/.md`.
 | 3 | `dota_yolo26s.yaml` | primary per-dataset model | ~2-3 h |
 | 4 | `all_yolo26s.yaml` | merged-data model | ~6-8 h |
 | 5 | `all_yolo26m.yaml` | scaled-up merged model | ~10-14 h |
+| 6 | `visdrone_yolo_family.yaml` | YOLOv8 vs YOLO11 vs YOLO26 (s) | ~12-18 h |
+| 7 | `codrone_yolo_family.yaml` / `dota_yolo_family.yaml` | family comparison on the other datasets | ~15 h / ~6 h |
+| 8 | `all_yolo_family.yaml` | family comparison + yolo26m on merged data | ~30-40 h |
+| 9 | `visdrone_yolo26_scale.yaml` | n/s/m scale sweep | ~10-14 h |
+
+Research architectures (LSKNet, STD, RVSA, Swin-OBB, Custom-OBB, ARS-DETR,
+AO2-DETR, RiO-DETR, RHINO, OrientedFormer) run through
+`src/training/dispatcher.py` with the same cleaned data; their tuned
+schedules/LRs/resolutions are documented in
+[docs/MODEL_TUNING_GUIDE.md](../docs/MODEL_TUNING_GUIDE.md).
 
 Tips: keep the Colab tab open; runs auto-save to Drive so a disconnect never
 loses more than the current epoch. Resume with

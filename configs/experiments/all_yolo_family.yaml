@@ -1,0 +1,12 @@
+# Merged dataset (codrone+visdrone+dota) — full YOLO family comparison.
+# 19,760 imgs / 1,056,385 boxes in one training set; best cross-dataset
+# generalization is expected from these runs (see training/cross_eval.py).
+dataset: all
+models: [yolov8s-obb, yolo11s-obb, yolo26s-obb, yolo26m-obb]
+epochs: 120
+imgsz: 1280
+batch: -1
+train_kwargs:
+  patience: 25
+  cos_lr: true
+  close_mosaic: 10

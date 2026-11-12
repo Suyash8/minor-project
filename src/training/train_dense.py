@@ -229,6 +229,7 @@ def train_dense_model(
     project_dir: Optional[str] = None,
     data_dir: Optional[str] = None,
     max_batches: Optional[int] = None,
+    patience: Optional[int] = None,
     **kwargs,
 ) -> Dict[str, Any]:
     """
@@ -354,6 +355,7 @@ def train_dense_model(
 
     # 5. Training Loop
     total_train_start = time.time()
+    epochs_since_best = 0
 
     for epoch in range(start_epoch, epochs + 1):
         net.train()
@@ -498,6 +500,16 @@ def train_dense_model(
                 target_copy = drive_save / f"{model_name}_best.pt"
                 if best_weights_path.resolve() != target_copy.resolve():
                     shutil.copy2(best_weights_path, target_copy)
+
+        # Early stopping on validation-loss plateau (patience from
+        # dispatcher MODEL_TUNING; None disables).
+        if is_best:
+            epochs_since_best = 0
+        else:
+            epochs_since_best += 1
+        if patience and epochs_since_best >= patience:
+            print(f"[!] Early stopping at epoch {epoch}: no val-loss improvement for {patience} epochs")
+            break
 
     # Save training history JSON
     history_path = save_dir / "train_history.json"

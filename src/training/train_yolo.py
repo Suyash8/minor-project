@@ -45,6 +45,9 @@ def train_yolo_obb(
     resume: bool = True,
     project_dir: Optional[str] = None,
     data_dir: Optional[str] = None,
+    patience: Optional[int] = None,
+    cos_lr: bool = True,
+    close_mosaic: int = 10,
     **kwargs,
 ) -> Dict[str, Any]:
     """
@@ -142,7 +145,12 @@ def train_yolo_obb(
         "exist_ok": True,
         "verbose": True,
         "resume": can_resume,
+        "cos_lr": cos_lr,            # cosine LR decay — best on cleaned 1280px data
+        "close_mosaic": close_mosaic # disable mosaic near the end so small-box
+                                     # regression settles (10 epochs default)
     }
+    if patience is not None:
+        train_args["patience"] = patience
     if cache and str(cache).lower() in ("ram", "disk", "true", "1"):
         train_args["cache"] = str(cache).lower() if str(cache).lower() in ("ram", "disk") else True
 

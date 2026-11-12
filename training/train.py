@@ -115,7 +115,7 @@ def resolve_jobs(a) -> list[dict]:
         sys.exit(f"error: --cfg file not found: {a.cfg}")
 
     datasets = a.datasets or ([cfg["dataset"]] if cfg.get("dataset") else None)
-    models = a.models or ([cfg["model"]] if cfg.get("model") else None)
+    models = a.models or (cfg.get("models") or ([cfg["model"]] if cfg.get("model") else None))
     if not datasets:
         sys.exit("error: no dataset selected (use --datasets, or dataset: in --cfg)")
     if not models and not a.resume:
@@ -146,8 +146,6 @@ def resolve_jobs(a) -> list[dict]:
 
 
 def run_one(job: dict, a, data_root: str, runs_dir: str) -> str | None:
-    from ultralytics import YOLO
-
     ds, model, kw = job["dataset"], job["model"], job["train_kwargs"]
     device = kw.pop("device", None)
     kw["batch"] = kw.get("batch", -1)
@@ -170,6 +168,8 @@ def run_one(job: dict, a, data_root: str, runs_dir: str) -> str | None:
     if a.dry_run:
         print("[dry-run] no training started")
         return None
+
+    from ultralytics import YOLO
 
     # fast local staging (Colab: Drive FUSE reads would dominate epoch time)
     if a.resume:

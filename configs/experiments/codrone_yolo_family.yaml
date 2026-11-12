@@ -1,0 +1,11 @@
+# CODrone family comparison — all three YOLO generations at s-scale.
+# CODrone: 9,894 imgs / 416,727 boxes; van is rare (7 instances, source-limited).
+dataset: codrone
+models: [yolov8s-obb, yolo11s-obb, yolo26s-obb]
+epochs: 150
+imgsz: 1280
+batch: -1
+train_kwargs:
+  patience: 30
+  cos_lr: true
+  close_mosaic: 10

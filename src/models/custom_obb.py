@@ -79,10 +79,10 @@ class OrientedDetectionHead(nn.Module):
             nn.Conv2d(in_channels, 7, kernel_size=1),
         )
 
-    def forward(self, feat: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, feat: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, Tuple[int, int]]:
         cls_logits = self.cls_head(feat)
         reg_out = self.reg_head(feat)
-        return cls_logits, reg_out
+        return cls_logits, reg_out, (int(feat.shape[2]), int(feat.shape[3]))
 
 class PyTorchOBBNet(nn.Module):
     """Full end-to-end oriented detector network."""
@@ -91,7 +91,7 @@ class PyTorchOBBNet(nn.Module):
         self.backbone = SmallOBBBackbone(in_channels=3, base_channels=32)
         self.head = OrientedDetectionHead(in_channels=128, num_classes=num_classes)
 
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, Tuple[int, int]]:
         feat = self.backbone(x)
         return self.head(feat)
 

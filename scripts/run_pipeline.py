@@ -183,8 +183,14 @@ def parse_args():
     parser.add_argument(
         "--epochs",
         type=int,
-        default=15,
-        help="Number of training epochs per model/dataset combination.",
+        default=None,
+        help="Number of training epochs per model/dataset combination. If omitted, uses model's tuned default (60 for dense, 80 for DETR).",
+    )
+    parser.add_argument(
+        "--patience",
+        type=int,
+        default=None,
+        help="Early stopping patience (epochs without validation loss improvement). If omitted, uses model's tuned default (12 for dense, 15 for DETR).",
     )
     parser.add_argument(
         "--train-batch-size",
@@ -213,8 +219,8 @@ def parse_args():
     parser.add_argument(
         "--imgsz",
         type=int,
-        default=640,
-        help="Input image resolution for model training.",
+        default=None,
+        help="Input image resolution for model training. If omitted, uses model's tuned default (1024 for dense, 768 for DETR).",
     )
     parser.add_argument(
         "--cache",
@@ -714,15 +720,16 @@ def run_training_suite(
     train_batch = min(args.train_batch_size, 2) if args.test else args.train_batch_size
     train_workers = 0 if args.test or device == "cpu" else args.train_workers
     train_imgsz = 160 if args.test else args.imgsz
+    train_patience = 2 if args.test else getattr(args, "patience", None)
 
     tracker = get_tracker()
-    tracker.stage_start("train", detail=f"models={requested_models} datasets={valid_datasets} epochs={train_epochs}")
+    tracker.stage_start("train", detail=f"models={requested_models} datasets={valid_datasets} epochs={train_epochs or 'auto-tuned'}")
 
     for d_name in valid_datasets:
         for m_name in requested_models:
-            print(f"\n>>> [Job Start] Training '{m_name}' on '{d_name.upper()}' ({train_epochs} Epochs) <<<")
+            print(f"\n>>> [Job Start] Training '{m_name}' on '{d_name.upper()}' ({train_epochs or 'auto-tuned'} Epochs) <<<")
             tracker.job_start(model=m_name, dataset=d_name, phase="train",
-                              epochs=train_epochs)
+                              epochs=train_epochs or 0)
             try:
                 res = train_model(
                     model_name=m_name,
@@ -730,6 +737,7 @@ def run_training_suite(
                     epochs=train_epochs,
                     batch_size=train_batch,
                     img_size=train_imgsz,
+                    patience=train_patience,
                     device=device,
                     workers=train_workers,
                     resume=args.resume,

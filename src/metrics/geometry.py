@@ -118,19 +118,22 @@ def polygon_iou(corners1: np.ndarray, corners2: np.ndarray) -> float:
         try:
             poly1 = Polygon(corners1)
             poly2 = Polygon(corners2)
-
-            if not poly1.is_valid:
-                poly1 = poly1.buffer(0)
-            if not poly2.is_valid:
-                poly2 = poly2.buffer(0)
-
             inter = poly1.intersection(poly2).area
             if inter <= 0.0:
                 return 0.0
             union = poly1.area + poly2.area - inter
             return float(inter / union) if union > 0 else 0.0
-        except Exception as e:
-            _warn_aabb_fallback_once(f"shapely error: {e}")
+        except Exception:
+            try:
+                p1 = poly1.buffer(0)
+                p2 = poly2.buffer(0)
+                inter = p1.intersection(p2).area
+                if inter <= 0.0:
+                    return 0.0
+                union = p1.area + p2.area - inter
+                return float(inter / union) if union > 0 else 0.0
+            except Exception as e:
+                _warn_aabb_fallback_once(f"shapely error: {e}")
 
     # Fallback to axis-aligned bounding box enclosing the corners
     if Polygon is None:

@@ -299,7 +299,7 @@ def validate_dense(
     for v_idx, (imgs, targets) in enumerate(val_loader):
         if max_batches is not None and v_idx >= max_batches:
             break
-        if compute_map and (v_idx % 20 == 0 or v_idx + 1 == total_val_batches):
+        if compute_map:
             print(f"\r  [val] batch {v_idx + 1}/{total_val_batches}...", end="", flush=True)
         imgs = _normalize_on_gpu(imgs, dev)
         with amp.autocast():

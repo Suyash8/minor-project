@@ -41,9 +41,12 @@ import argparse
 import multiprocessing as mp
 import os
 import shutil
+import subprocess
 import sys
+import tarfile
 import threading
 import time
+import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
@@ -328,6 +331,162 @@ def resolve_reader(local_path: str, source_path: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# fast archive staging (.tar / .tar.gz / .zip)
+# ---------------------------------------------------------------------------
+ARCHIVE_EXTS = (".tar", ".tar.gz", ".tgz", ".zip")
+
+
+def find_dataset_archive(dataset: str, src_root: str) -> Optional[Path]:
+    """Search for a pre-packaged dataset archive (.tar, .tar.gz, .zip).
+
+    Streaming a single 2 GB archive from Google Drive to local NVMe takes
+    ~15 seconds at 150-200 MB/s, avoiding thousands of slow per-file HTTP
+    roundtrips over FUSE.
+
+    Checks:
+      1. src_root/<dataset>.tar[.gz|.zip]
+      2. src_root/../<dataset>.tar[.gz|.zip]
+      3. src_root/archives/<dataset>.tar[.gz|.zip]
+      4. /content/drive/MyDrive/object-detection/<dataset>.tar[.gz|.zip]
+    """
+    src_p = Path(src_root)
+    candidates: List[Path] = []
+    for ext in ARCHIVE_EXTS:
+        candidates.append(src_p / f"{dataset}{ext}")
+        candidates.append(src_p.parent / f"{dataset}{ext}")
+        candidates.append(src_p / "archives" / f"{dataset}{ext}")
+        candidates.append(src_p.parent / "archives" / f"{dataset}{ext}")
+        if os.path.isdir("/content/drive/MyDrive/object-detection"):
+            candidates.append(Path(f"/content/drive/MyDrive/object-detection/{dataset}{ext}"))
+            candidates.append(Path(f"/content/drive/MyDrive/object-detection/cleaned_data/{dataset}{ext}"))
+
+    for c in candidates:
+        try:
+            if c.is_file() and c.stat().st_size > 1024:  # valid non-empty archive
+                return c
+        except OSError:
+            continue
+    return None
+
+
+def extract_dataset_archive(archive_path: Path, dst_root: str, dataset: str) -> bool:
+    """Fast-extract a dataset archive directly into dst_root.
+
+    Inspects archive structure to unpack correctly whether the top-level
+    folder is '<dataset>/' or directly split folders ('train/', 'val/').
+    Prefers native 'tar' / 'unzip' binaries for maximum NVMe I/O speed.
+    """
+    dst_p = Path(dst_root)
+    dst_ds = dst_p / dataset
+    archive_str = str(archive_path)
+
+    has_prefix = False
+    try:
+        if archive_str.endswith((".tar", ".tar.gz", ".tgz")):
+            with tarfile.open(archive_path, "r:*") as tf:
+                first = tf.next()
+                if first and (first.name == dataset or first.name.startswith(f"{dataset}/")):
+                    has_prefix = True
+        elif archive_str.endswith(".zip"):
+            with zipfile.ZipFile(archive_path, "r") as zf:
+                nl = zf.namelist()
+                first = nl[0] if nl else ""
+                if first and (first == dataset or first.startswith(f"{dataset}/")):
+                    has_prefix = True
+    except Exception as e:
+        print(f"[stage][warn] archive inspection ({archive_path.name}): {e}",
+              file=sys.stderr)
+
+    extract_dest = dst_p if has_prefix else dst_ds
+    extract_dest.mkdir(parents=True, exist_ok=True)
+
+    print(f"[stage] fast-unpacking archive {archive_path.name} -> {extract_dest}...",
+          flush=True)
+    t0 = time.time()
+    success = False
+
+    if archive_str.endswith((".tar", ".tar.gz", ".tgz")):
+        tar_flags = "-xzf" if archive_str.endswith((".tar.gz", ".tgz")) else "-xf"
+        try:
+            subprocess.run(["tar", tar_flags, archive_str, "-C", str(extract_dest)],
+                           check=True, capture_output=True)
+            success = True
+        except (subprocess.SubprocessError, FileNotFoundError):
+            pass
+
+        if not success:
+            try:
+                with tarfile.open(archive_path, "r:*") as tf:
+                    tf.extractall(extract_dest)
+                success = True
+            except Exception as e:
+                print(f"[stage][error] tar extraction failed ({archive_path.name}): {e}",
+                      file=sys.stderr)
+
+    elif archive_str.endswith(".zip"):
+        try:
+            subprocess.run(["unzip", "-q", "-o", archive_str, "-d", str(extract_dest)],
+                           check=True, capture_output=True)
+            success = True
+        except (subprocess.SubprocessError, FileNotFoundError):
+            pass
+
+        if not success:
+            try:
+                with zipfile.ZipFile(archive_path, "r") as zf:
+                    zf.extractall(extract_dest)
+                success = True
+            except Exception as e:
+                print(f"[stage][error] zip extraction failed ({archive_path.name}): {e}",
+                      file=sys.stderr)
+
+    if success:
+        elapsed = max(time.time() - t0, 0.1)
+        sz_mb = archive_path.stat().st_size / 1e6
+        print(f"[stage] successfully unpacked {archive_path.name} ({sz_mb:.1f} MB) in "
+              f"{elapsed:.1f}s ({sz_mb / elapsed:.1f} MB/s)!", flush=True)
+    return success
+
+
+def pack_dataset_archive(src_ds_dir: str, dst_archive: Path) -> bool:
+    """Pack a staged dataset directory into an uncompressed .tar on Drive/source.
+
+    Uncompressed tar streams at full speed on Drive and extracts in seconds.
+    """
+    src_p = Path(src_ds_dir)
+    if not src_p.is_dir():
+        return False
+    dst_archive = Path(dst_archive)
+    dst_archive.parent.mkdir(parents=True, exist_ok=True)
+
+    t0 = time.time()
+    ds_name = src_p.name
+    parent_dir = src_p.parent
+
+    # Try native tar first
+    try:
+        subprocess.run(["tar", "-cf", str(dst_archive), "-C", str(parent_dir), ds_name],
+                       check=True, capture_output=True)
+        sz_mb = dst_archive.stat().st_size / 1e6
+        print(f"[stage] packed {dst_archive.name} ({sz_mb:.1f} MB) in "
+              f"{time.time() - t0:.1f}s", flush=True)
+        return True
+    except (subprocess.SubprocessError, FileNotFoundError):
+        pass
+
+    try:
+        with tarfile.open(dst_archive, "w") as tf:
+            tf.add(src_p, arcname=ds_name)
+        sz_mb = dst_archive.stat().st_size / 1e6
+        print(f"[stage] packed {dst_archive.name} ({sz_mb:.1f} MB) in "
+              f"{time.time() - t0:.1f}s", flush=True)
+        return True
+    except Exception as e:
+        print(f"[stage][warn] pack archive failed: {e}", file=sys.stderr)
+        return False
+
+
+# ---------------------------------------------------------------------------
 # background staging
 # ---------------------------------------------------------------------------
 def _split_of(rel_path: str) -> int:
@@ -393,7 +552,25 @@ class StageHandle:
         for ds in self.datasets:
             src_ds = os.path.join(self.src_root, ds)
             dst_ds = os.path.join(self.dst_root, ds)
+
+            # Fast archive path: if a .tar/.zip archive exists on Drive/source,
+            # unpack it directly in seconds instead of slow per-file FUSE copies.
+            archive = find_dataset_archive(ds, self.src_root)
+            if archive:
+                is_staged = False
+                if os.path.isdir(dst_ds):
+                    inv_chk = list_dataset_files(src_ds) if os.path.isdir(src_ds) else list_dataset_files(dst_ds)
+                    if inv_chk and not pending_files(src_ds if os.path.isdir(src_ds) else dst_ds, dst_ds, inv_chk):
+                        is_staged = True
+                if not is_staged:
+                    extract_dataset_archive(archive, self.dst_root, ds)
+
             if not os.path.isdir(src_ds):
+                if os.path.isdir(dst_ds):
+                    inv = list_dataset_files(dst_ds)
+                    self._total += len(inv)
+                    self._done += len(inv)
+                    continue
                 self._errors.append(f"source dataset missing: {src_ds}")
                 continue
             # Create the destination tree eagerly so readers can resolve
@@ -689,6 +866,8 @@ def main(argv: Optional[List[str]] = None) -> None:
     p.add_argument("--workers", type=int, default=16)
     p.add_argument("--force", action="store_true",
                    help="wipe the destination dataset dirs first")
+    p.add_argument("--pack-archive", action="store_true",
+                   help="pack staged dataset into an uncompressed <dataset>.tar on Drive/source")
     args = p.parse_args(argv)
 
     datasets = REAL_DATASETS if "all" in [d.lower() for d in args.datasets] \
@@ -705,6 +884,11 @@ def main(argv: Optional[List[str]] = None) -> None:
         st = stage_status(ds, src_root=args.src, dst_root=root)
         print(f"[stage] {ds}: {st.done}/{st.total} files "
               f"({'complete' if st.complete else 'INCOMPLETE'})")
+        if args.pack_archive and st.complete:
+            dst_ds = os.path.join(root, ds)
+            tar_target = Path(source_root(args.src)) / f"{ds}.tar"
+            print(f"[stage] packing archive {tar_target} for instant future staging...")
+            pack_dataset_archive(dst_ds, tar_target)
 
 
 if __name__ == "__main__":

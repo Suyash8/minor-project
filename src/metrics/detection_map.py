@@ -27,19 +27,18 @@ def compute_ap_from_pr(recalls: np.ndarray, precisions: np.ndarray) -> float:
     ap = float(np.mean(mpre[inds]))
     return ap
 
-def evaluate_class_detection(
+def evaluate_class_multi_iou(
     gt_list: List[Dict[str, Any]],
     pred_list: List[Dict[str, Any]],
-    iou_threshold: float = 0.50,
+    iou_thresholds: List[float],
     scale_filter: Tuple[float, float] = (0.0, float("inf")),
-) -> Dict[str, Any]:
+) -> Dict[float, Dict[str, Any]]:
     """
-    Evaluate detection for a single class at a specific IoU threshold.
-    Filters GT and predictions by box area if scale_filter is provided.
+    Evaluate detection for a single class across multiple IoU thresholds in a
+    single geometry pass. Pairwise box IoUs are computed exactly once per prediction,
+    avoiding redundant O(N*M) Shapely polygon intersections.
     """
-    # Count total ground truths in this scale
     n_gt = 0
-    gt_matched_per_img = []
     filtered_gt_per_img = []
 
     for img_gt in gt_list:
@@ -49,9 +48,7 @@ def evaluate_class_detection(
         valid_boxes = boxes[mask]
         n_gt += len(valid_boxes)
         filtered_gt_per_img.append(valid_boxes)
-        gt_matched_per_img.append(np.zeros(len(valid_boxes), dtype=bool))
 
-    # Collect and sort all predictions across images by confidence descending
     all_preds = []
     for img_idx, img_pred in enumerate(pred_list):
         boxes = img_pred.get("boxes", np.zeros((0, 5)))
@@ -62,53 +59,74 @@ def evaluate_class_detection(
         for b, s in zip(boxes[mask], scores[mask]):
             all_preds.append((float(s), img_idx, b))
 
+    results: Dict[float, Dict[str, Any]] = {}
     if n_gt == 0:
-        return {"ap": 0.0, "precision": 0.0, "recall": 0.0, "tp": 0, "fp": len(all_preds), "fn": 0}
+        empty = {"ap": 0.0, "precision": 0.0, "recall": 0.0, "tp": 0, "fp": len(all_preds), "fn": 0}
+        return {th: dict(empty) for th in iou_thresholds}
     if len(all_preds) == 0:
-        return {"ap": 0.0, "precision": 0.0, "recall": 0.0, "tp": 0, "fp": 0, "fn": n_gt}
+        empty = {"ap": 0.0, "precision": 0.0, "recall": 0.0, "tp": 0, "fp": 0, "fn": n_gt}
+        return {th: dict(empty) for th in iou_thresholds}
 
-    # Sort predictions by score descending
     all_preds.sort(key=lambda x: x[0], reverse=True)
 
-    tp = np.zeros(len(all_preds))
-    fp = np.zeros(len(all_preds))
-
-    for p_idx, (score, img_idx, p_box) in enumerate(all_preds):
+    # Match each prediction to best ground-truth box once
+    pred_matches = []
+    for score, img_idx, p_box in all_preds:
         gt_boxes = filtered_gt_per_img[img_idx]
-        matched = gt_matched_per_img[img_idx]
-
         if len(gt_boxes) == 0:
-            fp[p_idx] = 1.0
-            continue
-
-        ious = compute_obb_iou_matrix(gt_boxes, np.expand_dims(p_box, 0))[:, 0]
-        best_gt_idx = int(np.argmax(ious))
-        best_iou = float(ious[best_gt_idx])
-
-        if best_iou >= iou_threshold and not matched[best_gt_idx]:
-            tp[p_idx] = 1.0
-            matched[best_gt_idx] = True
+            pred_matches.append((img_idx, -1, 0.0))
         else:
-            fp[p_idx] = 1.0
+            ious = compute_obb_iou_matrix(gt_boxes, np.expand_dims(p_box, 0))[:, 0]
+            best_gt_idx = int(np.argmax(ious))
+            best_iou = float(ious[best_gt_idx])
+            pred_matches.append((img_idx, best_gt_idx, best_iou))
 
-    cum_tp = np.cumsum(tp)
-    cum_fp = np.cumsum(fp)
-    recalls = cum_tp / float(n_gt)
-    precisions = cum_tp / (cum_tp + cum_fp + 1e-12)
+    for th in iou_thresholds:
+        gt_matched_per_img = [np.zeros(len(b), dtype=bool) for b in filtered_gt_per_img]
+        tp = np.zeros(len(all_preds))
+        fp = np.zeros(len(all_preds))
 
-    ap = compute_ap_from_pr(recalls, precisions)
-    total_tp = int(cum_tp[-1])
-    total_fp = int(cum_fp[-1])
-    total_fn = n_gt - total_tp
+        for p_idx, (img_idx, best_gt_idx, best_iou) in enumerate(pred_matches):
+            if best_gt_idx >= 0 and best_iou >= th and not gt_matched_per_img[img_idx][best_gt_idx]:
+                tp[p_idx] = 1.0
+                gt_matched_per_img[img_idx][best_gt_idx] = True
+            else:
+                fp[p_idx] = 1.0
 
-    return {
-        "ap": ap,
-        "precision": float(precisions[-1]) if len(precisions) > 0 else 0.0,
-        "recall": float(recalls[-1]) if len(recalls) > 0 else 0.0,
-        "tp": total_tp,
-        "fp": total_fp,
-        "fn": total_fn,
-    }
+        cum_tp = np.cumsum(tp)
+        cum_fp = np.cumsum(fp)
+        recalls = cum_tp / float(n_gt)
+        precisions = cum_tp / (cum_tp + cum_fp + 1e-12)
+
+        ap = compute_ap_from_pr(recalls, precisions)
+        total_tp = int(cum_tp[-1])
+        total_fp = int(cum_fp[-1])
+        total_fn = n_gt - total_tp
+
+        results[th] = {
+            "ap": ap,
+            "precision": float(precisions[-1]) if len(precisions) > 0 else 0.0,
+            "recall": float(recalls[-1]) if len(recalls) > 0 else 0.0,
+            "tp": total_tp,
+            "fp": total_fp,
+            "fn": total_fn,
+        }
+
+    return results
+
+
+def evaluate_class_detection(
+    gt_list: List[Dict[str, Any]],
+    pred_list: List[Dict[str, Any]],
+    iou_threshold: float = 0.50,
+    scale_filter: Tuple[float, float] = (0.0, float("inf")),
+) -> Dict[str, Any]:
+    """
+    Evaluate detection for a single class at a specific IoU threshold.
+    Filters GT and predictions by box area if scale_filter is provided.
+    """
+    return evaluate_class_multi_iou(gt_list, pred_list, [iou_threshold], scale_filter)[iou_threshold]
+
 
 def compute_map_metrics(
     all_gt: List[List[Dict[str, Any]]],
@@ -123,7 +141,6 @@ def compute_map_metrics(
     num_classes = len(class_names)
     num_images = len(all_gt)
 
-    iou_thresholds = [0.50, 0.75]
     range_ious = [round(x, 2) for x in list(float(i) / 100.0 for i in range(50, 100, 5))]
 
     ap50_per_class = []
@@ -139,17 +156,12 @@ def compute_map_metrics(
         gt_cls = [all_gt[img][c] for img in range(num_images)]
         pred_cls = [all_preds[img][c] for img in range(num_images)]
 
-        # AP50 and AP75
-        res_50 = evaluate_class_detection(gt_cls, pred_cls, iou_threshold=0.50)
-        res_75 = evaluate_class_detection(gt_cls, pred_cls, iou_threshold=0.75)
-        ap50_per_class.append(res_50["ap"])
-        ap75_per_class.append(res_75["ap"])
+        # Single-pass multi-threshold evaluation across range_ious (0.50 .. 0.95)
+        multi_res = evaluate_class_multi_iou(gt_cls, pred_cls, range_ious)
+        ap50_per_class.append(multi_res[0.50]["ap"])
+        ap75_per_class.append(multi_res[0.75]["ap"])
 
-        # Range IoU 0.50:0.95
-        range_aps = []
-        for iou_th in range_ious:
-            r = evaluate_class_detection(gt_cls, pred_cls, iou_threshold=iou_th)
-            range_aps.append(r["ap"])
+        range_aps = [multi_res[iou_th]["ap"] for iou_th in range_ious]
         range_ap_per_class.append(float(np.mean(range_aps)))
 
         # Scale breakdowns at IoU 0.50

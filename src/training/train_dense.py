@@ -295,9 +295,12 @@ def validate_dense(
     all_gt: List[List[Dict[str, Any]]] = []
     all_pred: List[List[Dict[str, Any]]] = []
 
+    total_val_batches = len(val_loader) if max_batches is None else min(len(val_loader), max_batches)
     for v_idx, (imgs, targets) in enumerate(val_loader):
         if max_batches is not None and v_idx >= max_batches:
             break
+        if compute_map and (v_idx % 20 == 0 or v_idx + 1 == total_val_batches):
+            print(f"\r  [val] batch {v_idx + 1}/{total_val_batches}...", end="", flush=True)
         imgs = _normalize_on_gpu(imgs, dev)
         with amp.autocast():
             cls_logits, reg_preds, feat_h, feat_w = forward_dense_network(
@@ -326,7 +329,9 @@ def validate_dense(
 
     val_loss = val_loss / max(n_batches, 1)
     if compute_map and all_gt:
+        print(f"\r  [val] computing mAP metrics across {len(class_names)} classes...    ", end="", flush=True)
         metrics = compute_map_metrics(all_gt, all_pred, class_names)
+        print("\r" + " " * 65 + "\r", end="", flush=True)
         return val_loss, float(metrics["map50"]), float(metrics["map50_95"])
     return val_loss, float("nan"), float("nan")
 

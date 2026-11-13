@@ -14,6 +14,23 @@ try:
 except ImportError:
     Polygon = None
 
+_AABB_FALLBACK_WARNED = False
+
+
+def _warn_aabb_fallback_once(reason: str) -> None:
+    """Review B: dropping from rotated-polygon IoU to axis-aligned IoU
+    silently corrupts every OBB metric - shout, once per process."""
+    global _AABB_FALLBACK_WARNED
+    if not _AABB_FALLBACK_WARNED:
+        _AABB_FALLBACK_WARNED = True
+        import sys
+        print("=" * 70, file=sys.stderr)
+        print("[metrics][WARNING] polygon IoU fell back to AXIS-ALIGNED box "
+              f"IoU ({reason}). OBB metrics are APPROXIMATE in this run; "
+              "install shapely (pinned in requirements.txt) for exact "
+              "rotated IoU.", file=sys.stderr)
+        print("=" * 70, file=sys.stderr)
+
 
 def obb_to_corners(cx: float, cy: float, w: float, h: float, angle_deg: float) -> np.ndarray:
     """
@@ -65,6 +82,24 @@ def polygon_to_obb_params(pts: np.ndarray) -> Tuple[float, float, float, float, 
     angle_deg = math.degrees(angle_rad) % 180.0
     return cx, cy, w, h, angle_deg
 
+def ultralytics_xywhr_to_suite(cx: float, cy: float, w: float, h: float,
+                               angle_rad: float) -> Tuple[float, float, float, float, float]:
+    """Convert one Ultralytics OBB prediction to the suite's box format.
+
+    Ultralytics reports (cx, cy, w, h, angle) with angle in radians (canonical
+    form: w is the longer side, angle in [-pi/4, 3pi/4), measured with the
+    same rotation-matrix convention as this module, i.e. positive angle
+    rotates the box's width axis toward +y in image coordinates). The suite
+    uses degrees in [0, 180). A rectangle is invariant under angle += 180 and
+    under (w, h, angle) -> (h, w, angle + 90), so degrees(angle) % 180
+    preserves the exact rectangle; correctness is covered by the synthetic
+    round-trip test in tests/test_v4_units.py (IoU == 1.0 vs the suite's own
+    polygon fitting over a grid of angles and w/h swaps).
+    """
+    return (float(cx), float(cy), float(w), float(h),
+            float(math.degrees(angle_rad)) % 180.0)
+
+
 def polygon_iou(corners1: np.ndarray, corners2: np.ndarray) -> float:
     """
     Compute intersection-over-union between two 4-point convex polygons.
@@ -94,10 +129,12 @@ def polygon_iou(corners1: np.ndarray, corners2: np.ndarray) -> float:
                 return 0.0
             union = poly1.area + poly2.area - inter
             return float(inter / union) if union > 0 else 0.0
-        except Exception:
-            pass
+        except Exception as e:
+            _warn_aabb_fallback_once(f"shapely error: {e}")
 
     # Fallback to axis-aligned bounding box enclosing the corners
+    if Polygon is None:
+        _warn_aabb_fallback_once("shapely not installed")
     inter_x = max(0.0, min(max_x1, max_x2) - max(min_x1, min_x2))
     inter_y = max(0.0, min(max_y1, max_y2) - max(min_y1, min_y2))
     inter_area = inter_x * inter_y

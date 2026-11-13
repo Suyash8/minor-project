@@ -1,88 +1,87 @@
-
-from __future__ import annotations
 #!/usr/bin/env python3
 """
-Dedicated evaluation script for evaluating a single model checkpoint against a dataset.
-"""
+[DEPRECATED SHIM] scripts/run_evaluation.py -> training/evaluate.py (v4)
 
-import sys
+Evaluation is unified in `training/evaluate.py` (W6): one protocol for all 23
+models (Ultralytics val for YOLO; shared decode + rotated NMS + src/metrics
+for dense/DETR), with sm/md/lg breakdown, confusion matrix and speed. This
+shim maps the old flags so existing commands keep working and produce
+byte-identical metrics to the canonical CLI.
+
+New canonical usage:
+    python training/evaluate.py --run runs/train/visdrone_lsknet --datasets visdrone
+"""
+from __future__ import annotations
+
 import argparse
+import sys
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.config import DEFAULT_DATA_DIR, DEFAULT_RESULTS_DIR
-from src.utils.env import get_device_info, set_seed
-from src.data.dataset import AerialOBBDataset
-from src.models import get_model
-from scripts.run_pipeline import run_single_evaluation
+NOTICE = (
+    "[deprecation] scripts/run_evaluation.py is a shim in v4; use "
+    "`python training/evaluate.py --run <run_dir> --datasets ...`."
+)
 
-def main():
-    parser = argparse.ArgumentParser(description="Evaluate a specific model on an aerial dataset.")
-    parser.add_argument("--model", type=str, default="yolov8n-obb", help="Model name or architecture.")
-    parser.add_argument("--weights", type=str, default=None, help="Path to checkpoint file (.pt).")
-    parser.add_argument("--dataset", type=str, default="codrone", help="Target dataset name.")
-    parser.add_argument("--split", type=str, default="val", help="Dataset split (val/test).")
-    parser.add_argument("--data-dir", type=str, default=str(DEFAULT_DATA_DIR), help="Data directory.")
-    parser.add_argument("--batch-size", type=int, default=8, help="Batch size.")
-    parser.add_argument("--device", type=str, default="auto", help="Inference device.")
-    parser.add_argument("--iou-thresh", type=float, default=0.50, help="Matching IoU threshold.")
-    parser.add_argument("--conf-thresh", type=float, default=0.25, help="Confidence threshold.")
-    parser.add_argument("--max-samples", type=int, default=None, help="Limit number of images evaluated.")
 
-    args = parser.parse_args()
-    set_seed(42)
+def main() -> None:
+    print(NOTICE, file=sys.stderr)
+    p = argparse.ArgumentParser(description="(shim) evaluate one checkpoint")
+    p.add_argument("--model", type=str, default=None)
+    p.add_argument("--weights", type=str, default=None)
+    p.add_argument("--run", type=str, default=None,
+                   help="run directory (v4 style; preferred)")
+    p.add_argument("--dataset", type=str, default=None)
+    p.add_argument("--datasets", nargs="+", default=None)
+    p.add_argument("--split", type=str, default="test")
+    p.add_argument("--data-dir", type=str, default=None)
+    p.add_argument("--batch-size", type=int, default=8)
+    p.add_argument("--device", type=str, default=None)
+    p.add_argument("--imgsz", type=int, default=1280)
+    p.add_argument("--iou-thresh", type=float, default=0.50)
+    p.add_argument("--conf-thresh", type=float, default=0.25)
+    p.add_argument("--max-samples", type=int, default=None)
+    a = p.parse_args()
 
-    dev_info = get_device_info(args.device)
-    device = dev_info["device"]
+    from training import evaluate
 
-    dataset = AerialOBBDataset(
-        dataset_name=args.dataset,
-        data_dir=Path(args.data_dir),
-        split=args.split,
-        max_samples=args.max_samples,
-    )
+    datasets = a.datasets or ([a.dataset] if a.dataset else None)
+    if a.run:
+        run_dir, weights = a.run, None
+    elif a.weights:
+        run_dir = str(Path(a.weights).resolve().parent.parent) \
+            if Path(a.weights).parent.name == "weights" \
+            else str(Path(a.weights).resolve().parent)
+        weights = a.weights
+    else:
+        p.error("need --run or --weights")
 
-    if len(dataset) == 0:
-        print(f"[!] Dataset {args.dataset} has 0 images in split {args.split} at {args.data_dir}.", file=sys.stderr)
-        sys.exit(1)
+    if weights and not a.model:
+        p.error("--weights requires --model in v4 (or use --run so the model "
+                "is read from run_manifest.json)")
 
-    print(f"[*] Evaluating {args.model} on {args.dataset} ({len(dataset)} images)...")
-    model = get_model(args.model, device=device, num_classes=len(dataset.class_names))
-    model.load(args.weights)
+    if weights:
+        from src.training.dispatcher import get_model_family
+        if get_model_family(a.model) == "yolo":
+            for ds in (datasets or ["visdrone"]):
+                evaluate.evaluate_weights(weights, ds, split=a.split,
+                                          data_root=a.data_dir, imgsz=a.imgsz,
+                                          batch=a.batch_size, device=a.device)
+        else:
+            for ds in (datasets or ["visdrone"]):
+                evaluate.evaluate_generic(a.model, weights, ds, split=a.split,
+                                          data_root=a.data_dir, imgsz=a.imgsz,
+                                          batch=a.batch_size, device=a.device,
+                                          conf_thresh=a.conf_thresh,
+                                          iou_thresh=a.iou_thresh)
+    else:
+        for ds in (datasets or []):
+            evaluate.evaluate_run(run_dir, ds, split=a.split, imgsz=a.imgsz,
+                                  batch=a.batch_size, device=a.device,
+                                  data_root=a.data_dir,
+                                  model_name=a.model)
 
-    out = run_single_evaluation(
-        model=model,
-        dataset=dataset,
-        device=device,
-        conf_thresh=args.conf_thresh,
-        iou_thresh=args.iou_thresh,
-        batch_size=args.batch_size,
-    )
-
-    map_res = out["map"]
-    cls_res = out["classification"]
-    reg_res = out["regression"]
-    perf_res = out["performance"]
-
-    print("\n" + "=" * 55)
-    print(" EVALUATION RESULTS")
-    print("=" * 55)
-    print(f"  mAP@0.50        : {map_res['map50']:.4f}")
-    print(f"  mAP@0.75        : {map_res['map75']:.4f}")
-    print(f"  mAP@0.50:0.95   : {map_res['map50_95']:.4f}")
-    print(f"  AP (Small)      : {map_res['ap_small']:.4f}")
-    print(f"  Precision       : {cls_res['macro_precision']:.4f}")
-    print(f"  Recall          : {cls_res['macro_recall']:.4f}")
-    print(f"  F1-Score        : {cls_res['macro_f1']:.4f}")
-    print(f"  Accuracy        : {cls_res['accuracy']:.4f}")
-    print(f"  Angle MAE       : {reg_res['angle_mae']:.2f}°")
-    print(f"  Pearson r       : {reg_res['angle_pearson_r']:.4f}")
-    print(f"  R² Score        : {reg_res['angle_r2']:.4f}")
-    print(f"  Throughput      : {perf_res['fps']:.1f} FPS ({perf_res['mean_latency_ms']:.1f} ms)")
-    print("=" * 55)
 
 if __name__ == "__main__":
     main()

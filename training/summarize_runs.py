@@ -52,34 +52,59 @@ def summarize_run(run_dir: str) -> dict | None:
     except FileNotFoundError:
         if not man:
             return None
+    # v4 manifests store resolved_tuning; v3 stored train_kwargs
+    tk = man.get("resolved_tuning") or man.get("train_kwargs", {})
     row = dict(
         run=os.path.basename(run_dir),
         model=man.get("model", "?"),
         dataset=man.get("dataset", "?"),
         git_commit=man.get("git_commit", "?"),
-        epochs=man.get("train_kwargs", {}).get("epochs", "?"),
-        imgsz=man.get("train_kwargs", {}).get("imgsz", "?"),
+        epochs=tk.get("epochs", "?"),
+        imgsz=tk.get("img_size", tk.get("imgsz", "?")),
         best_epoch="", map50_val="", map5095_val="",
-        map50_test="", map5095_test="", params_m="", run_dir=run_dir,
+        map50_test="", map5095_test="", params_m="",
+        latency_ms="", imgs_per_sec="", run_dir=run_dir,
     )
     best = read_results_csv(run_dir)
     if best:
         row["best_epoch"] = best.get("epoch", "")
         row["map50_val"] = round(float(best.get("metrics/mAP50(B)", 0) or 0), 4)
         row["map5095_val"] = round(float(best.get("metrics/mAP50-95(B)", 0) or 0), 4)
-    ev = os.path.join(run_dir, f"eval_{row['dataset']}_test.json")
-    if os.path.isfile(ev):
-        with open(ev) as f:
-            e = json.load(f)
-        row["map50_test"] = e.get("map50", "")
-        row["map5095_test"] = e.get("map50_95", "")
-        row["params_m"] = round(e.get("parameters", 0) / 1e6, 2)
+    for split in ("test", "val"):
+        ev = os.path.join(run_dir, f"eval_{row['dataset']}_{split}.json")
+        if os.path.isfile(ev):
+            with open(ev) as f:
+                e = json.load(f)
+            if e.get("comparable", True) is False:
+                # Ultralytics-native fallback metrics are a different,
+                # non-comparable protocol; never mix them into the summary.
+                print(f"[skip] {os.path.basename(run_dir)}: {os.path.basename(ev)} "
+                      f"is protocol '{e.get('protocol')}' (not comparable)")
+                continue
+            if not common.protocol_current(e):
+                # B-round note 3: older-protocol eval JSONs (different
+                # coord_space/GT handling) must not be summarized with
+                # current results.
+                print(f"[skip] {os.path.basename(run_dir)}: "
+                      f"{os.path.basename(ev)} has coord_space "
+                      f"'{e.get('coord_space')}' from an older, incompatible "
+                      f"eval protocol - re-run evaluation")
+                continue
+            row["map50_test"] = e.get("map50", "")
+            row["map5095_test"] = e.get("map50_95", "")
+            row["params_m"] = round(e.get("parameters", 0) / 1e6, 2)
+            row["latency_ms"] = (e.get("speed_ms") or {}).get("inference", "")
+            row["imgs_per_sec"] = e.get("imgs_per_sec", "")
+            break
     return row
 
 
 def main(argv=None):
     p = argparse.ArgumentParser(description="Summarize training runs")
     p.add_argument("--runs-dir", default=None)
+    p.add_argument("--out", default=None,
+                   help="master summary CSV (dataset x model -> mAP/params/"
+                        "latency), e.g. results/master_summary.csv (W6.4)")
     a = p.parse_args(argv)
     runs_dir = common.default_runs_dir(a.runs_dir)
 
@@ -94,7 +119,7 @@ def main(argv=None):
     csv_path = os.path.join(runs_dir, "summary.csv")
     cols = ["run", "model", "dataset", "epochs", "imgsz", "best_epoch",
             "map50_val", "map5095_val", "map50_test", "map5095_test",
-            "params_m", "git_commit", "run_dir"]
+            "params_m", "latency_ms", "imgs_per_sec", "git_commit", "run_dir"]
     with open(csv_path, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=cols, extrasaction="ignore")
         w.writeheader()
@@ -108,7 +133,15 @@ def main(argv=None):
         for r in rows:
             f.write("| " + " | ".join(str(r.get(c, "")) for c in cols[:-1]) + " |\n")
 
-    print(f"{len(rows)} runs summarized ->\n  {csv_path}\n  {md_path}\n")
+    if a.out:
+        os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
+        with open(a.out, "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=cols, extrasaction="ignore")
+            w.writeheader()
+            w.writerows(rows)
+
+    print(f"{len(rows)} runs summarized ->\n  {csv_path}\n  {md_path}\n"
+          + (f"  {a.out}\n" if a.out else ""))
     with open(md_path) as f:
         print(f.read())
 

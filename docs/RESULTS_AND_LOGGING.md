@@ -1,5 +1,19 @@
 # Logging, Run Tracking, and Result Exports
 
+> **v4 update:** the unified pipeline (`training/run.py`) writes, per run
+> (`runs/train/<dataset>_<model>/`): `weights/best.pt`, `weights/last.pt`,
+> `results.csv` (columns: epoch, lr, train/val loss components,
+> `metrics/mAP50(B)`, `metrics/mAP50-95(B)`, imgs_per_sec, gpu_mem_gb, time),
+> `run_manifest.json` (model, dataset, git commit, resolved tuning, status,
+> `final_metrics` when finished - its absence marks a resumable run), and
+> `eval_<dataset>_<split>.json` (mAP50/50-95/75, per-class AP/precision/
+> recall, small/medium/large AP, confusion matrix, imgs/s, latency, params).
+> Suite level: `runs/pipeline_state.json` (job queue + failures with
+> tracebacks), `runs/summary.csv|md`, `results/master_summary.csv`,
+> `runs/train/cross_eval.csv|md|json` + `cross_eval_heatmap.png`.
+> The v3 run-logging infrastructure below still applies to the legacy shims.
+
+
 This document describes the observability and reporting infrastructure of the
 benchmark suite: what gets written where during a run, and how to turn raw
 results into the final Excel/report tables.

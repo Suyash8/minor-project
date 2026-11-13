@@ -577,4 +577,10 @@ def prepare_dataset_for_yolo_training(dataset_name: str, data_dir: Optional[Path
     elif d_lower == "dota":
         return convert_dota_to_yolo_obb(base_dir)
     else:
+        # generic path (e.g. the 'mock' CI dataset): reuse an existing
+        # Ultralytics YAML written alongside the data if one exists
+        for candidate in (base_dir / f"{d_lower}.yaml",
+                          base_dir / "dataset.yaml"):
+            if candidate.is_file():
+                return candidate
         raise ValueError(f"Unknown dataset for YOLO-OBB preparation: {dataset_name}")

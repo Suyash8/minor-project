@@ -148,24 +148,18 @@ def stage_local(ds: str, data_root: str, local_root: str | None = None,
     """Copy dataset(s) from slow storage (Drive) to fast local disk.
 
     Returns (effective_data_root, dataset_yaml_path). Idempotent: an already
-    fully-staged dataset (same file count) is not re-copied.
+    fully-staged dataset is not re-copied.
+
+    v4 (W2): delegates to `training.staging`, which copies atomically
+    (.part + os.replace), writes .stage_manifest.json receipts and verifies
+    exact byte sizes instead of the old file-count heuristic. The legacy
+    signature and return contract are preserved for older callers.
     """
-    local_root = local_root or os.environ.get(
-        "VEHICLE_OBB_STAGE", "/content/vehicle_obb_data")
+    from training.staging import stage_datasets_blocking
+
     src_sets = REAL_DATASETS if ds == "all" else [ds]
-    for s in src_sets:
-        src = os.path.join(data_root, s)
-        dst = os.path.join(local_root, s)
-        n_src = sum(len(fs) for _r, _d, fs in os.walk(src)) if os.path.isdir(src) else 0
-        n_dst = sum(len(fs) for _r, _d, fs in os.walk(dst)) if os.path.isdir(dst) else 0
-        if n_src and n_dst == n_src:
-            print(f"[stage] {s}: already staged ({n_dst} files), skipping")
-            continue
-        print(f"[stage] {s}: copying {n_src} files -> {dst} "
-              f"({workers} threads) ...")
-        if os.path.isdir(dst):
-            shutil.rmtree(dst)
-        _copy_tree(src, dst, workers)
+    local_root = stage_datasets_blocking(
+        src_sets, src_root=data_root, dst_root=local_root, workers=workers)
     return local_root, ensure_dataset_yaml(ds, local_root)
 
 
@@ -242,6 +236,19 @@ def human_bytes(n: int) -> str:
             return f"{n:.1f}{unit}"
         n /= 1024
     return f"{n:.1f}PB"
+
+
+CURRENT_COORD_SPACE_PREFIX = "original image px"
+
+
+def protocol_current(res: dict) -> bool:
+    """True when an eval result JSON came from the CURRENT unified protocol
+    (R3+B1: GT raw in original image coordinates, preds inverse-letterboxed).
+    Older coord_space values (e.g. 'letterbox(imgsz)') mixed different GT
+    sets per family/imgsz and must never be aggregated with current
+    results - cross_eval and summarize_runs skip them with a warning.
+    """
+    return str(res.get("coord_space", "")).startswith(CURRENT_COORD_SPACE_PREFIX)
 
 
 def count_instances(ds: str, data_root: str, split: str = "test") -> dict[str, int]:

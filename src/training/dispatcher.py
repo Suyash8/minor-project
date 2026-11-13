@@ -1,9 +1,9 @@
 """
-Master Dispatcher and Routing Suite for Aerial OBB Model Training
-==================================================================
+Master Dispatcher and Routing Suite for Aerial OBB Model Training (v4)
+=======================================================================
 Routes any requested model to its dedicated, academically standard training engine:
   1. Ultralytics YOLO Engine (`src/training/train_yolo.py`):
-     - YOLOv8-OBB, YOLO11-OBB (Ultralytics)
+     - YOLOv8-OBB, YOLO11-OBB, YOLO26-OBB (n/s/m/l, Ultralytics)
   2. Hungarian Set Prediction DETR Engine (`src/training/train_detr.py`):
      - ARS-DETR (IEEE TGRS 2024 / ICCV 2023)
      - AO2-DETR (IEEE TCSVT 2023)
@@ -17,54 +17,59 @@ Routes any requested model to its dedicated, academically standard training engi
      - Swin-OBB (ICCV 2021 / MMRotate)
      - Custom-OBB (Rotated FCOS / CenterNet-OBB baseline)
      - Native YOLO11-OBB (PyTorch dense anchor-free implementation)
+
+v4: model family membership and the canonical 23-model registry live in
+`src.config` (CANONICAL_MODELS / MODEL_FAMILY / resolve_model_names). This
+module consumes that single source of truth; legacy spellings are normalized
+through LEGACY_NAME_MAP before dispatch.
 """
 
 from __future__ import annotations
 
-from typing import Dict, Any, Optional
+from typing import Dict, Any, List, Optional
+
+from src.config import (
+    CANONICAL_MODELS,
+    DENSE_SUITE_MODELS,
+    DETR_SUITE_MODELS,
+    MODEL_FAMILY,
+    YOLO_SUITE_MODELS,
+)
 from src.training.train_yolo import train_yolo_obb
 from src.training.train_dense import train_dense_model
 from src.training.train_detr import train_detr_model
 
-DETR_MODELS = {
-    "ars-detr",
-    "ars_detr",
-    "ao2-detr",
-    "ao2_detr",
-    "rio-detr",
-    "rio_detr",
-    "rhino",
-    "rhino-detector",
-    "oriented-former",
-    "orientedformer",
+# Backward-compatible family sets (supersets of the canonical registry with
+# the historical spellings older scripts used).
+DETR_MODELS = set(DETR_SUITE_MODELS) | {
+    "ars_detr", "ao2_detr", "rio_detr", "rhino-detector", "orientedformer",
+}
+DENSE_MODELS = set(DENSE_SUITE_MODELS) | {
+    "std-detector", "rvsa-detector", "lsk-net", "swin",
+}
+YOLO_MODELS = set(YOLO_SUITE_MODELS)
+
+# Historical spellings -> canonical registry name.
+LEGACY_NAME_MAP: Dict[str, str] = {
+    "ars_detr": "ars-detr",
+    "ao2_detr": "ao2-detr",
+    "rio_detr": "rio-detr",
+    "rhino-detector": "rhino",
+    "orientedformer": "oriented-former",
+    "std-detector": "std",
+    "rvsa-detector": "rvsa",
+    "lsk-net": "lsknet",
+    "swin": "swin-obb",
+    "custom": "custom-obb",
+    "yolo11_obb": "yolo11-obb",
 }
 
-DENSE_MODELS = {
-    "std",
-    "std-detector",
-    "rvsa",
-    "rvsa-detector",
-    "lsknet",
-    "lsk-net",
-    "swin-obb",
-    "swin",
-    "custom-obb",
-}
 
-YOLO_MODELS = {
-    "yolov8n-obb",
-    "yolov8s-obb",
-    "yolov8m-obb",
-    "yolov8l-obb",
-    "yolo11n-obb",
-    "yolo11s-obb",
-    "yolo11m-obb",
-    "yolo11l-obb",
-    "yolo26n-obb",
-    "yolo26s-obb",
-    "yolo26m-obb",
-    "yolo26l-obb",
-}
+def canonicalize_model_name(model_name: str) -> str:
+    """Normalize legacy/alternate spellings to the canonical registry name."""
+    key = model_name.lower().strip()
+    return LEGACY_NAME_MAP.get(key, key)
+
 
 # --------------------------------------------------------------------------
 # Per-model optimized training defaults for the CLEANED v4.1 datasets
@@ -129,7 +134,7 @@ MODEL_TUNING: Dict[str, Dict[str, Any]] = {
 def get_tuned_defaults(model_name: str) -> Dict[str, Any]:
     """Optimized per-model training defaults for the cleaned v4.1 datasets.
     Returns a copy so callers can safely merge/override."""
-    return dict(MODEL_TUNING.get(model_name.lower().strip(), {}))
+    return dict(MODEL_TUNING.get(canonicalize_model_name(model_name), {}))
 
 
 def apply_tuned_defaults(
@@ -165,18 +170,15 @@ def get_model_family(model_name: str) -> str:
     Determine the training paradigm family for a given model architecture.
     Returns: 'yolo', 'detr', or 'dense'.
     """
-    m_lower = model_name.lower().strip()
+    canonical = canonicalize_model_name(model_name)
+    if canonical in MODEL_FAMILY:
+        return MODEL_FAMILY[canonical]
+    m_lower = canonical.lower().strip()
     if m_lower in DETR_MODELS:
         return "detr"
-    elif m_lower in YOLO_MODELS:
+    if m_lower in YOLO_MODELS or "yolo" in m_lower:
         return "yolo"
-    elif m_lower in DENSE_MODELS:
-        return "dense"
-    elif "yolo" in m_lower:
-        # Default yolo variants to Ultralytics if not pure custom
-        return "yolo"
-    else:
-        return "dense"
+    return "dense"
 
 
 def train_model(
@@ -196,14 +198,17 @@ def train_model(
     **kwargs,
 ) -> Dict[str, Any]:
     """
-    Universal training dispatcher for all 10+ aerial OBB architectures.
+    Universal training dispatcher for the 23 aerial OBB architectures.
     Automatically identifies model family, applies the per-model optimized
     defaults for the cleaned v4.1 datasets (schedule, LR, resolution, batch),
     and runs full GPU training with checkpointing.
 
     Any explicitly passed argument overrides the tuned default; omitted
-    arguments fall back to MODEL_TUNING for that model.
+    arguments fall back to MODEL_TUNING for that model (§4.3 tuning contract).
+    Extra v4 engine kwargs (micro_batch, ema, augment, resize_mode,
+    mirror_dir, staging, run_dir, ...) pass straight through to the engines.
     """
+    model_name = canonicalize_model_name(model_name)
     family = get_model_family(model_name)
     tuned = apply_tuned_defaults(
         model_name, epochs=epochs, lr=lr, weight_decay=weight_decay,
@@ -252,6 +257,7 @@ def train_model(
             project_dir=project_dir,
             data_dir=data_dir,
             warmup_epochs=tuned.get("warmup", 5),
+            patience=patience,
             **kwargs,
         )
 

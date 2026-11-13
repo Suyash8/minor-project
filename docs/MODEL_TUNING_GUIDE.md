@@ -1,4 +1,15 @@
-# Per-Model Tuning Guide — Cleaned v4.1 Datasets
+# Per-Model Tuning Guide - Cleaned v4.1 Datasets
+
+> **v4 update:** the tuning mechanism is unchanged and still lives ONLY in
+> `src/training/dispatcher.py::MODEL_TUNING` (explicit CLI flags override it).
+> v4 adds gradient accumulation, so `batch_size` in the table is the
+> EFFECTIVE batch; the engines split it into micro-batches automatically when
+> VRAM requires. W5.2 note: v4 augmentation landed after this grid was
+> measured; no re-tuned numbers are claimed - any future grid change must be
+> justified by measured short experiments and documented here, never invented.
+> DETR query-collapse guard: warmup epochs stay mandatory, micro-batch >= 2
+> on GPU, and the engine warns when matched queries hit 0 in an epoch.
+
 
 Every architecture in this repo is now tuned for the **cleaned v4.1 datasets**
 (8-class unified space, images pre-resized to 1280 px long side, v4.1 split

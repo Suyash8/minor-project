@@ -6,6 +6,9 @@ Parses annotations from YOLO-OBB, DOTA polygon, and VisDrone formats into a stan
 from __future__ import annotations
 
 import math
+import os
+import pickle
+import shutil
 import sys
 import zipfile
 import xml.etree.ElementTree as ET
@@ -14,7 +17,30 @@ from typing import List, Dict, Any, Optional, Tuple
 import numpy as np
 from PIL import Image
 
+try:
+    import cv2
+    HAS_CV2 = True
+except ImportError:
+    HAS_CV2 = False
+
 from src.config import DATASET_CLASSES, DATASET_STATIC_PATHS, CLEANED_DATASET_CLASSES, cleaned_data_root
+
+
+def _annotation_fingerprint(label_paths: List[Path]) -> Tuple[int, int, int]:
+    """Cheap cache-invalidation fingerprint: file count + total size + max mtime.
+    Any label edit, add or delete changes at least one component."""
+    n = 0
+    total = 0
+    max_mtime = 0
+    for p in label_paths:
+        try:
+            st = p.stat()
+        except OSError:
+            continue
+        n += 1
+        total += st.st_size
+        max_mtime = max(max_mtime, st.st_mtime_ns)
+    return n, total, max_mtime
 
 def polygon_to_obb_params(pts: np.ndarray) -> Tuple[float, float, float, float, float]:
     """
@@ -57,6 +83,9 @@ class AerialOBBDataset:
         data_dir: Path,
         split: str = "val",
         max_samples: Optional[int] = None,
+        use_cache: bool = True,
+        ram_cache: bool = False,
+        disk_cache_dir: Optional[str] = None,
     ):
         self.dataset_name = dataset_name.lower()
         self.data_dir = Path(data_dir) / self.dataset_name
@@ -72,8 +101,241 @@ class AerialOBBDataset:
         self.class_names = DATASET_CLASSES.get(self.dataset_name, ["car", "van", "truck", "bus", "pedestrian"])
         self.class_to_idx = {name: i for i, name in enumerate(self.class_names)}
 
+        # v4: optional read resolver for overlapped staging (training/staging.py).
+        # When set, every file read is routed through it so a not-yet-staged
+        # local file is transparently read from the source (Drive) instead.
+        self.resolver = None
+        # v4: annotation cache — parse each label file at most once per
+        # fingerprint instead of re-parsing text on every epoch.
+        self.use_cache = use_cache
+        self._ann_cache: Optional[List[Optional[Dict[str, Any]]]] = None
+        # W3.7 `--cache ram`: decoded images cached in RAM, bounded by a
+        # fraction of currently-free memory (psutil when available, sysconf
+        # otherwise) so a big dataset degrades to plain streaming instead of
+        # OOMing the box.
+        self.ram_cache = ram_cache
+        self._img_cache: Dict[int, np.ndarray] = {}
+        self._img_cache_bytes = 0
+        self._img_cache_budget = self._ram_budget_bytes() if ram_cache else 0
+        # W3.7 `--cache disk` (review: must be a REAL tier, not an alias of
+        # `annotations`): decoded image arrays persist as .npy on fast local
+        # disk (the staging root), so later epochs/models skip both the
+        # source read AND the JPEG decode. Atomic tmp+rename writes; writes
+        # stop when free disk falls below 2 GiB.
+        self.disk_cache_dir = (Path(disk_cache_dir) / self.dataset_name / split
+                               if disk_cache_dir else None)
+        if self.disk_cache_dir is not None:
+            self.disk_cache_dir.mkdir(parents=True, exist_ok=True)
+
         self.samples = []
         self._discover_samples(max_samples)
+        if self.use_cache:
+            self._ann_cache = self._load_or_build_cache()
+
+    def set_resolver(self, resolver) -> None:
+        """Attach a training/staging resolver (overlapped Drive->NVMe reads)."""
+        self.resolver = resolver
+
+    def sample_relpaths(self) -> List[str]:
+        """Image paths of all samples, relative to the dataset root.
+
+        Used to feed the staging queue the exact per-epoch consumption order
+        (W2.2): queue relpaths are relative to <src_root>/<dataset>, which is
+        exactly self.data_dir.
+        """
+        out: List[str] = []
+        for s in self.samples:
+            try:
+                out.append(os.path.relpath(str(s["image_path"]),
+                                           str(self.data_dir)))
+            except (ValueError, KeyError):
+                continue
+        return out
+
+    def _resolve_read_path(self, path: Path) -> Path:
+        if self.resolver is None:
+            return path
+        return Path(self.resolver.resolve(str(path)))
+
+    # ------------------------------------------------------------------
+    # annotation cache (v4, W3): parse once per fingerprint, mirroring
+    # Ultralytics' labels.cache behaviour for the dense/DETR engines.
+    # ------------------------------------------------------------------
+    def _cache_path(self) -> Optional[Path]:
+        lbl_dirs = {s["label_path"].parent for s in self.samples if s.get("label_path")}
+        if len(lbl_dirs) == 1:
+            return lbl_dirs.pop() / "labels.cache"
+        return self.data_dir / f"labels_{self.split}.cache"
+
+    def _load_or_build_cache(self) -> Optional[List[Optional[Dict[str, Any]]]]:
+        label_paths = [s["label_path"] for s in self.samples if s.get("label_path")]
+        if not label_paths:
+            return None
+        fp = _annotation_fingerprint(label_paths)
+        cache_path = self._cache_path()
+        if cache_path and cache_path.exists():
+            try:
+                with open(cache_path, "rb") as f:
+                    blob = pickle.load(f)
+                if blob.get("fingerprint") == fp and len(blob.get("entries", [])) == len(self.samples):
+                    return blob["entries"]
+            except Exception:
+                pass  # corrupt or stale cache: rebuild below
+
+        entries: List[Optional[Dict[str, Any]]] = []
+        for sample in self.samples:
+            lbl = sample.get("label_path")
+            if lbl is None:
+                entries.append(None)
+                continue
+            entries.append(self._parse_label_file(self._resolve_read_path(lbl)))
+
+        if cache_path:
+            try:
+                tmp = cache_path.with_suffix(cache_path.suffix + ".tmp")
+                with open(tmp, "wb") as f:
+                    pickle.dump({"fingerprint": fp, "entries": entries}, f,
+                                protocol=pickle.HIGHEST_PROTOCOL)
+                os.replace(tmp, cache_path)
+            except OSError:
+                pass  # read-only directory (e.g. Drive): caching just skips
+        return entries
+
+    def _parse_label_file(self, lbl_path: Path) -> Dict[str, Any]:
+        """Parse one label file into cacheable form.
+
+        Returns {'fmt': 'corners_norm' | 'cxcywha', 'items': [[cls, ...], ...]}:
+        - corners_norm: YOLO-OBB normalized corner polygons (need image dims
+          at read time to recover pixel geometry).
+        - cxcywha: absolute-pixel (cx, cy, w, h, angle_deg) from XML / VisDrone
+          CSV / DOTA polygon formats.
+        """
+        items_corners: List[List[float]] = []
+        items_abs: List[List[float]] = []
+
+        if lbl_path.suffix.lower() == ".xml":
+            self._parse_xml(lbl_path, items_abs)
+            return {"fmt": "cxcywha", "items": items_abs}
+
+        try:
+            with open(lbl_path, "r", encoding="utf-8", errors="ignore") as f:
+                lines = f.readlines()
+        except OSError:
+            return {"fmt": "cxcywha", "items": []}
+
+        synonyms = {
+            "people": "pedestrian",
+            "motor": "motorcyclist",
+            "bicycle": "cyclist",
+            "traffic_signs": "traffic_sign",
+            "traffic_lights": "traffic_light",
+            "traffic-signs": "traffic-sign",
+            "traffic-lights": "traffic-light",
+        }
+
+        def _cls_idx(raw: str) -> Optional[int]:
+            raw = raw.lower()
+            for cand in (raw, raw.replace("-", "_"), raw.replace("_", "-"),
+                         synonyms.get(raw, raw),
+                         synonyms.get(raw.replace("-", "_"), raw.replace("-", "_"))):
+                if cand in self.class_to_idx:
+                    return self.class_to_idx[cand]
+            return None
+
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+
+            # VisDrone CSV (left, top, w, h, score, category, trunc, occl)
+            if "," in line:
+                sub = [p.strip() for p in line.split(",")]
+                if len(sub) >= 6:
+                    try:
+                        x, y, w, h = (float(sub[i]) for i in range(4))
+                        score = int(sub[4])
+                        cls_idx = int(sub[5]) - 1
+                        if score == 1 and 0 <= cls_idx < len(self.class_names):
+                            items_abs.append([cls_idx, x + w / 2.0, y + h / 2.0,
+                                              max(w, 1.0), max(h, 1.0), 0.0])
+                    except (ValueError, IndexError):
+                        continue
+                continue
+
+            parts = line.split()
+
+            # YOLO-OBB (cls x1 y1 x2 y2 x3 y3 x4 y4 normalized)
+            if len(parts) == 9 and not any(ch.isalpha() or ch == "-" for ch in parts[8]):
+                try:
+                    cls_idx = int(parts[0])
+                    if 0 <= cls_idx < len(self.class_names):
+                        coords = [float(p) for p in parts[1:]]
+                        items_corners.append([cls_idx] + coords)
+                except (ValueError, IndexError):
+                    pass
+
+            # DOTA / CODrone polygon (x1 y1 ... x4 y4 class_name [difficult])
+            elif len(parts) >= 9:
+                try:
+                    pts = np.array([float(p) for p in parts[:8]]).reshape(4, 2)
+                    cls_idx = _cls_idx(parts[8])
+                    if cls_idx is not None and cls_idx < len(self.class_names):
+                        cx, cy, w, h, angle = polygon_to_obb_params(pts)
+                        items_abs.append([cls_idx, cx, cy, w, h, angle])
+                except (ValueError, IndexError):
+                    continue
+
+        if items_corners:
+            return {"fmt": "corners_norm", "items": items_corners}
+        return {"fmt": "cxcywha", "items": items_abs}
+
+    def _parse_xml(self, lbl_path: Path, items_abs: List[List[float]]) -> None:
+        try:
+            root = ET.parse(lbl_path).getroot()
+        except Exception:
+            return
+        synonyms = {
+            "people": "pedestrian",
+            "motor": "motorcyclist",
+            "bicycle": "cyclist",
+            "traffic_signs": "traffic_sign",
+            "traffic_lights": "traffic_light",
+            "traffic-signs": "traffic-sign",
+            "traffic-lights": "traffic-light",
+        }
+        for obj in root.findall("object"):
+            name_elem = obj.find("name")
+            if name_elem is None or not name_elem.text:
+                continue
+            raw = name_elem.text.strip().lower()
+            cls_idx = None
+            for cand in (raw, raw.replace("-", "_"), raw.replace("_", "-"),
+                         synonyms.get(raw, raw),
+                         synonyms.get(raw.replace("-", "_"), raw.replace("-", "_"))):
+                if cand in self.class_to_idx:
+                    cls_idx = self.class_to_idx[cand]
+                    break
+            if cls_idx is None or cls_idx >= len(self.class_names):
+                continue
+            bnd = obj.find("bndbox")
+            if bnd is None:
+                continue
+            try:
+                if bnd.find("x0") is not None:
+                    pts = np.array([[
+                        float(bnd.find(f"x{i}").text), float(bnd.find(f"y{i}").text)]
+                        for i in range(4)], dtype=np.float32)
+                    cx, cy, w, h, angle = polygon_to_obb_params(pts)
+                    items_abs.append([cls_idx, cx, cy, w, h, angle])
+                elif bnd.find("xmin") is not None:
+                    xmin = float(bnd.find("xmin").text)
+                    ymin = float(bnd.find("ymin").text)
+                    xmax = float(bnd.find("xmax").text)
+                    ymax = float(bnd.find("ymax").text)
+                    items_abs.append([cls_idx, (xmin + xmax) / 2.0, (ymin + ymax) / 2.0,
+                                      max(xmax - xmin, 1.0), max(ymax - ymin, 1.0), 0.0])
+            except (ValueError, TypeError, AttributeError):
+                pass
 
     def _discover_samples(self, max_samples: Optional[int] = None) -> None:
         """Find image and label file pairs directly using static dataset paths."""
@@ -272,174 +534,119 @@ class AerialOBBDataset:
 
     def get_ground_truth(self, idx: int, img_width: int, img_height: int) -> List[Dict[str, Any]]:
         """
-        Parse annotations for sample at idx into per-class boxes:
+        Annotations for sample idx as per-class boxes:
         gt[class_idx] = {'boxes': ndarray of [cx, cy, w, h, angle_deg]}
+
+        v4: served from the fingerprinted annotation cache when enabled, so
+        label text is parsed once per dataset version, not once per epoch.
         """
         num_classes = len(self.class_names)
-        gt_by_class = [{"boxes": []} for _ in range(num_classes)]
-
+        empty = [{"boxes": np.zeros((0, 5), dtype=np.float32)} for _ in range(num_classes)]
         if idx >= len(self.samples):
-            return [{"boxes": np.zeros((0, 5), dtype=np.float32)} for _ in range(num_classes)]
+            return empty
 
-        lbl_path = self.samples[idx]["label_path"]
-        if not lbl_path or not lbl_path.exists():
-            return [{"boxes": np.zeros((0, 5), dtype=np.float32)} for _ in range(num_classes)]
+        if self._ann_cache is not None:
+            parsed = self._ann_cache[idx]
+        else:
+            lbl_path = self.samples[idx]["label_path"]
+            if not lbl_path:
+                return empty
+            resolved = self._resolve_read_path(lbl_path)
+            if not resolved.exists():
+                return empty
+            parsed = self._parse_label_file(resolved)
 
-        # Handle XML annotations (Pascal VOC / CoDrone robndbox XML)
-        if lbl_path.suffix.lower() == ".xml":
-            try:
-                tree = ET.parse(lbl_path)
-                root = tree.getroot()
-                for obj in root.findall("object"):
-                    name_elem = obj.find("name")
-                    if name_elem is None or not name_elem.text:
-                        continue
-                    raw_cls = name_elem.text.strip().lower()
-                    raw_cls_underscore = raw_cls.replace("-", "_")
-                    raw_cls_hyphen = raw_cls.replace("_", "-")
-                    synonyms = {
-                        "people": "pedestrian",
-                        "motor": "motorcyclist",
-                        "bicycle": "cyclist",
-                        "traffic_signs": "traffic_sign",
-                        "traffic_lights": "traffic_light",
-                        "traffic-signs": "traffic-sign",
-                        "traffic-lights": "traffic-light",
-                    }
-                    norm_cls = synonyms.get(raw_cls, raw_cls)
-                    norm_cls_underscore = synonyms.get(raw_cls_underscore, raw_cls_underscore)
+        if parsed is None:
+            return empty
 
-                    cls_idx = None
-                    for candidate in [raw_cls, raw_cls_underscore, raw_cls_hyphen, norm_cls, norm_cls_underscore]:
-                        if candidate in self.class_to_idx:
-                            cls_idx = self.class_to_idx[candidate]
-                            break
-
-                    if cls_idx is None or cls_idx >= num_classes:
-                        continue
-
-                    bnd = obj.find("bndbox")
-                    if bnd is not None:
-                        if bnd.find("x0") is not None:
-                            try:
-                                pts = np.array([
-                                    [float(bnd.find("x0").text), float(bnd.find("y0").text)],
-                                    [float(bnd.find("x1").text), float(bnd.find("y1").text)],
-                                    [float(bnd.find("x2").text), float(bnd.find("y2").text)],
-                                    [float(bnd.find("x3").text), float(bnd.find("y3").text)],
-                                ], dtype=np.float32)
-                                cx, cy, w, h, angle = polygon_to_obb_params(pts)
-                                gt_by_class[cls_idx]["boxes"].append([cx, cy, w, h, angle])
-                            except (ValueError, TypeError, AttributeError):
-                                pass
-                        elif bnd.find("xmin") is not None:
-                            try:
-                                xmin = float(bnd.find("xmin").text)
-                                ymin = float(bnd.find("ymin").text)
-                                xmax = float(bnd.find("xmax").text)
-                                ymax = float(bnd.find("ymax").text)
-                                cx = (xmin + xmax) / 2.0
-                                cy = (ymin + ymax) / 2.0
-                                w = max(xmax - xmin, 1.0)
-                                h = max(ymax - ymin, 1.0)
-                                gt_by_class[cls_idx]["boxes"].append([cx, cy, w, h, 0.0])
-                            except (ValueError, TypeError, AttributeError):
-                                pass
-            except Exception:
-                pass
-
-            for c in range(num_classes):
-                if len(gt_by_class[c]["boxes"]) > 0:
-                    gt_by_class[c]["boxes"] = np.array(gt_by_class[c]["boxes"], dtype=np.float32)
-                else:
-                    gt_by_class[c]["boxes"] = np.zeros((0, 5), dtype=np.float32)
-            return gt_by_class
-
-        with open(lbl_path, "r", encoding="utf-8", errors="ignore") as f:
-            lines = f.readlines()
-
-        for line in lines:
-            line = line.strip()
-            if not line:
-                continue
-
-            # Format 1: VisDrone CSV format (left, top, width, height, score, category, trunc, occl)
-            if "," in line:
-                subparts = [p.strip() for p in line.split(",")]
-                if len(subparts) >= 6:
-                    try:
-                        x, y, w, h = float(subparts[0]), float(subparts[1]), float(subparts[2]), float(subparts[3])
-                        score = int(subparts[4])
-                        cls_idx = int(subparts[5]) - 1 # VisDrone categories are 1-indexed
-                        # Skip ignored classes (cls_idx == -1 or score == 0)
-                        if score == 1 and 0 <= cls_idx < num_classes:
-                            cx = x + w / 2.0
-                            cy = y + h / 2.0
-                            gt_by_class[cls_idx]["boxes"].append([cx, cy, w, h, 0.0])
-                    except (ValueError, IndexError):
-                        continue
-                continue
-
-            parts = line.split()
-
-            # Format 2: YOLO-OBB (class_idx x1 y1 x2 y2 x3 y3 x4 y4 normalized)
-            # Exactly 9 parts, with no alphabetical class name in parts[8]
-            if len(parts) == 9 and not any(ch.isalpha() or ch == "-" for ch in parts[8]):
-                try:
-                    cls_idx = int(parts[0])
-                    if cls_idx < num_classes:
-                        pts = np.array([float(p) for p in parts[1:]]).reshape(4, 2)
-                        pts[:, 0] *= img_width
-                        pts[:, 1] *= img_height
-                        cx, cy, w, h, angle = polygon_to_obb_params(pts)
-                        gt_by_class[cls_idx]["boxes"].append([cx, cy, w, h, angle])
-                except (ValueError, IndexError):
-                    pass
-
-            # Format 3: DOTA / CODrone (x1 y1 x2 y2 x3 y3 x4 y4 class_name [difficult])
-            elif len(parts) >= 9:
-                try:
-                    pts = np.array([float(p) for p in parts[:8]]).reshape(4, 2)
-                    raw_cls = parts[8].lower()
-                    raw_cls_underscore = raw_cls.replace("-", "_")
-                    raw_cls_hyphen = raw_cls.replace("_", "-")
-
-                    # Normalize category synonyms
-                    synonyms = {
-                        "people": "pedestrian",
-                        "motor": "motorcyclist",
-                        "bicycle": "cyclist",
-                        "traffic_signs": "traffic_sign",
-                        "traffic_lights": "traffic_light",
-                        "traffic-signs": "traffic-sign",
-                        "traffic-lights": "traffic-light",
-                    }
-                    norm_cls = synonyms.get(raw_cls, raw_cls)
-                    norm_cls_underscore = synonyms.get(raw_cls_underscore, raw_cls_underscore)
-
-                    cls_idx = None
-                    for candidate in [raw_cls, raw_cls_underscore, raw_cls_hyphen, norm_cls, norm_cls_underscore]:
-                        if candidate in self.class_to_idx:
-                            cls_idx = self.class_to_idx[candidate]
-                            break
-
-                    if cls_idx is not None and cls_idx < num_classes:
-                        cx, cy, w, h, angle = polygon_to_obb_params(pts)
-                        gt_by_class[cls_idx]["boxes"].append([cx, cy, w, h, angle])
-                except (ValueError, IndexError):
+        gt_by_class = [{"boxes": []} for _ in range(num_classes)]
+        if parsed["fmt"] == "corners_norm":
+            for item in parsed["items"]:
+                cls_idx = int(item[0])
+                if cls_idx >= num_classes:
                     continue
+                pts = np.array(item[1:], dtype=np.float32).reshape(4, 2)
+                pts[:, 0] *= img_width
+                pts[:, 1] *= img_height
+                cx, cy, w, h, angle = polygon_to_obb_params(pts)
+                gt_by_class[cls_idx]["boxes"].append([cx, cy, w, h, angle])
+        else:
+            for item in parsed["items"]:
+                cls_idx = int(item[0])
+                if cls_idx < num_classes:
+                    gt_by_class[cls_idx]["boxes"].append(item[1:])
 
-
-        # Convert to numpy arrays
         for c in range(num_classes):
             if len(gt_by_class[c]["boxes"]) > 0:
                 gt_by_class[c]["boxes"] = np.array(gt_by_class[c]["boxes"], dtype=np.float32)
             else:
                 gt_by_class[c]["boxes"] = np.zeros((0, 5), dtype=np.float32)
-
         return gt_by_class
 
+    @staticmethod
+    def _ram_budget_bytes() -> int:
+        """RAM-cache budget: 25% of currently available memory."""
+        try:
+            import psutil
+            return int(psutil.virtual_memory().available * 0.25)
+        except ImportError:
+            try:
+                return int(os.sysconf("SC_AVPHYS_PAGES")
+                           * os.sysconf("SC_PAGE_SIZE") * 0.25)
+            except (ValueError, OSError, AttributeError):
+                print("[dataset] ram_cache requested but free memory is "
+                      "undeterminable (no psutil/sysconf) - RAM image cache "
+                      "disabled, annotations cache still active",
+                      file=sys.stderr)
+                return 0
+
+    def get_image_array(self, idx: int) -> np.ndarray:
+        """Load sample idx as an (H, W, 3) uint8 RGB array.
+
+        OpenCV decode (cv2.setNumThreads(0) is applied inside DataLoader
+        workers) with a PIL fallback. Reads go through the staging resolver
+        when one is attached, so a not-yet-staged local file is read from the
+        source mount instead of failing. With ram_cache on, decoded arrays
+        are memoized up to the free-memory budget.
+        """
+        if self.ram_cache and idx in self._img_cache:
+            return self._img_cache[idx]
+        disk_path = None
+        if self.disk_cache_dir is not None:
+            stem = Path(self.samples[idx]["image_path"]).stem
+            disk_path = self.disk_cache_dir / f"{stem}.npy"
+            if disk_path.is_file():
+                try:
+                    return np.load(disk_path)
+                except Exception as e:  # corrupt cache entry: rebuild loud
+                    print(f"[dataset][warn] disk cache entry unreadable "
+                          f"({disk_path}): {e}; decoding from source",
+                          file=sys.stderr)
+        img_path = self._resolve_read_path(self.samples[idx]["image_path"])
+        if HAS_CV2:
+            arr = cv2.imread(str(img_path), cv2.IMREAD_COLOR)
+            if arr is None:
+                raise FileNotFoundError(f"could not decode image: {img_path}")
+            arr = cv2.cvtColor(arr, cv2.COLOR_BGR2RGB)
+        else:
+            arr = np.array(Image.open(img_path).convert("RGB"), dtype=np.uint8)
+        if self.ram_cache and self._img_cache_budget > 0:
+            nbytes = int(arr.nbytes)
+            if self._img_cache_bytes + nbytes <= self._img_cache_budget:
+                self._img_cache[idx] = arr
+                self._img_cache_bytes += nbytes
+        if disk_path is not None:
+            try:
+                free = shutil.disk_usage(str(self.disk_cache_dir)).free
+                if free > 2 * 1024 ** 3:
+                    tmp = disk_path.with_name(disk_path.name + ".part")
+                    np.save(tmp, arr)
+                    os.replace(tmp, disk_path)
+            except OSError as e:
+                print(f"[dataset][warn] disk cache write failed "
+                      f"({disk_path}): {e}", file=sys.stderr)
+        return arr
+
     def get_image(self, idx: int) -> Image.Image:
-        """Load and return PIL Image."""
-        img_path = self.samples[idx]["image_path"]
-        return Image.open(img_path).convert("RGB")
+        """Load and return a PIL Image (kept for the detector wrappers)."""
+        return Image.fromarray(self.get_image_array(idx))

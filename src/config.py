@@ -166,34 +166,107 @@ UNIFIED_CLASSES: List[str] = [
     "motorcyclist",
 ]
 
-# Supported model architectures
-SUPPORTED_MODELS: List[str] = [
-    # Nano models (edge, lightweight, T4 friendly)
-    "yolov8n-obb",
-    "yolo11n-obb",
-    # Small models (balanced speed/accuracy)
-    "yolov8s-obb",
-    "yolo11s-obb",
-    # Medium models (high capacity for A100/L4/V100)
-    "yolov8m-obb",
-    "yolo11m-obb",
-    # Large models (maximum representation capacity)
-    "yolov8l-obb",
-    "yolo11l-obb",
-    # Custom PyTorch Anchor-Free detector
-    "custom-obb",
-    # 10 Key Survey Models (Post-2022, Transformer-Focused)
-    "std",
-    "rvsa",
-    "ars-detr",
-    "oriented-former",
-    "rio-detr",
-    "rhino",
-    "ao2-detr",
-    "swin-obb",
-    "lsknet",
-    "yolo11-obb",
+# ---------------------------------------------------------------------------
+# CANONICAL MODEL REGISTRY (v4) — the single source of truth for all 23 models.
+#
+# Family A — Ultralytics YOLO-OBB suite (12): trained through the Ultralytics
+#   engine (training/run.py -> training/train.py).
+# Family B — Dense grid detectors (6): trained through src/training/train_dense.py.
+# Family C — DETR-family query detectors (5): trained through src/training/train_detr.py.
+#
+# Every entry point, CLI choice list, config validator and docs table must be
+# derived from CANONICAL_MODELS / MODEL_FAMILY below. No model list may be
+# hardcoded anywhere else (v4 work item W1 / debt row D5).
+# ---------------------------------------------------------------------------
+YOLO_SUITE_MODELS: List[str] = [
+    "yolov8n-obb", "yolov8s-obb", "yolov8m-obb", "yolov8l-obb",
+    "yolo11n-obb", "yolo11s-obb", "yolo11m-obb", "yolo11l-obb",
+    "yolo26n-obb", "yolo26s-obb", "yolo26m-obb", "yolo26l-obb",
 ]
+DENSE_SUITE_MODELS: List[str] = [
+    "lsknet", "std", "rvsa", "swin-obb", "custom-obb", "yolo11-obb",
+]
+DETR_SUITE_MODELS: List[str] = [
+    "ars-detr", "ao2-detr", "rio-detr", "rhino", "oriented-former",
+]
+
+CANONICAL_MODELS: List[str] = YOLO_SUITE_MODELS + DENSE_SUITE_MODELS + DETR_SUITE_MODELS
+assert len(CANONICAL_MODELS) == 23, "registry must expose exactly 23 models"
+
+MODEL_FAMILY: Dict[str, str] = (
+    {m: "yolo" for m in YOLO_SUITE_MODELS}
+    | {m: "dense" for m in DENSE_SUITE_MODELS}
+    | {m: "detr" for m in DETR_SUITE_MODELS}
+)
+
+# Approximate relative training cost rank, used by the unified pipeline to
+# order jobs small/fast-first (so a time-limited Colab session finishes the
+# cheap models before it dies). Lower = cheaper.
+MODEL_SIZE_RANK: Dict[str, int] = {
+    **{m: 0 for m in CANONICAL_MODELS if m.endswith("n-obb")},
+    **{m: 1 for m in CANONICAL_MODELS if m.endswith("s-obb")},
+    **{m: 2 for m in CANONICAL_MODELS if m.endswith("m-obb")},
+    **{m: 3 for m in CANONICAL_MODELS if m.endswith("l-obb")},
+    "custom-obb": 0,
+    "yolo11-obb": 1,   # native dense re-implementation
+    "std": 1,
+    "lsknet": 1,
+    "swin-obb": 2,
+    "rvsa": 2,
+    "ars-detr": 1,
+    "ao2-detr": 1,
+    "rio-detr": 2,
+    "rhino": 2,
+    "oriented-former": 2,
+}
+
+# Selection aliases accepted by every CLI that takes --models. A bare model
+# name always refers to itself; these aliases expand to groups.
+MODEL_ALIASES: Dict[str, List[str]] = {
+    "all": list(CANONICAL_MODELS),
+    "yolo": list(YOLO_SUITE_MODELS),
+    "ultralytics": list(YOLO_SUITE_MODELS),
+    "dense": list(DENSE_SUITE_MODELS),
+    "detr": list(DETR_SUITE_MODELS),
+    "yolov8": [m for m in YOLO_SUITE_MODELS if m.startswith("yolov8")],
+    "yolo11": [m for m in YOLO_SUITE_MODELS if m.startswith("yolo11")],  # Ultralytics yolo11 family (native impl is 'yolo11-obb')
+    "yolo26": [m for m in YOLO_SUITE_MODELS if m.startswith("yolo26")],
+    "nano": [m for m in YOLO_SUITE_MODELS if m.endswith("n-obb")],
+    "small": [m for m in YOLO_SUITE_MODELS if m.endswith("s-obb")],
+    "medium": [m for m in YOLO_SUITE_MODELS if m.endswith("m-obb")],
+    "large": [m for m in YOLO_SUITE_MODELS if m.endswith("l-obb")],
+}
+
+
+def resolve_model_names(names: List[str]) -> List[str]:
+    """Expand aliases and validate model names against the canonical registry.
+
+    Accepts any mix of bare model names and MODEL_ALIASES keys; returns a
+    de-duplicated list in canonical registry order.
+    """
+    if not names:
+        raise ValueError("no models selected")
+    requested: List[str] = []
+    unknown: List[str] = []
+    for raw in names:
+        key = str(raw).lower().strip()
+        if key in MODEL_ALIASES:
+            requested.extend(MODEL_ALIASES[key])
+        elif key in CANONICAL_MODELS:
+            requested.append(key)
+        else:
+            unknown.append(str(raw))
+    if unknown:
+        raise ValueError(
+            f"unknown model(s): {unknown}. Choose from {CANONICAL_MODELS} "
+            f"or aliases {sorted(MODEL_ALIASES)}"
+        )
+    return [m for m in CANONICAL_MODELS if m in set(requested)]
+
+
+# Supported model architectures (v4: derived from the canonical registry;
+# kept under the old name for backward compatibility with existing scripts).
+SUPPORTED_MODELS: List[str] = list(CANONICAL_MODELS)
 
 # Supported datasets
 SUPPORTED_DATASETS: List[str] = [

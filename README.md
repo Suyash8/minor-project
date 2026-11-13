@@ -1,200 +1,90 @@
-# Aerial OBB Object Detection & Benchmark Suite
+# Aerial OBB Detection & Benchmark Suite (v4)
 
-A modular, reproducible research framework for evaluating and analyzing Oriented Bounding Box (OBB) object detection in challenging aerial drone conditions (e.g. 30° oblique tilt, altitude drift 30m–100m, sub-15px targets, dense traffic queues, and road shadows).
+One pipeline trains, evaluates and compares **23 oriented-object-detection
+models** on the cleaned CoDrone / VisDrone / DOTA datasets (8 frozen classes:
+pedestrian, bicycle, car, van, truck, bus, tricycle, motorcyclist).
 
----
+- **12 Ultralytics YOLO-OBB**: yolov8 / yolo11 / yolo26 x n,s,m,l
+- **6 dense anchor-free PyTorch**: lsknet, std, rvsa, swin-obb, custom-obb, yolo11-obb (native)
+- **5 DETR-family**: ars-detr, ao2-detr, rio-detr, rhino, oriented-former
 
-## NEW: Cleaned-Data Training Pipeline (ALL models, per-model tuned)
-
-The project now has a complete, end-to-end pipeline built around the three
-cleaned, cross-compatible datasets (CODrone / VisDrone / DOTA → unified
-8-class space), with **every architecture tuned for the cleaned data** —
-the full Ultralytics YOLO-OBB suite (YOLOv8 / YOLO11 / YOLO26, n→m scales)
-plus all 11 research architectures (LSKNet, STD, RVSA, Swin-OBB,
-Custom-OBB, native YOLO11-OBB, ARS-DETR, AO2-DETR, RiO-DETR, RHINO,
-OrientedFormer):
-
-```
-data_cleaning/    clean raw sources -> 3 separated, cross-compatible datasets
-                  (discovery, format auto-detection, class unification, MD5
-                  dedup, 4px filter, 1280px resize, stratified 82/9/9 split)
-training/         train.py / evaluate.py / cross_eval.py / summarize_runs.py
-configs/experiments/   ready-made presets (dataset x model, incl. family sweeps)
-src/training/     dense/DETR engines — now read the cleaned layout directly
-                  with per-model optimized defaults (see docs/MODEL_TUNING_GUIDE.md)
-assets/dota_labels_all.zip   the DOTA v1.0+v1.5 label package (reproducibility)
-```
-
-Quick start (Colab GPU runtime):
-
-```bash
-!git clone https://github.com/Suyash8/minor-project.git /content/minor-project
-%cd /content/minor-project
-!python training/colab_quickstart.py --cfg configs/experiments/visdrone_yolo26s.yaml
-```
-
-Benchmark all three YOLO generations in one run:
-
-```bash
-!python training/train.py --cfg configs/experiments/visdrone_yolo_family.yaml
-```
-
-Research architectures (dense/DETR) train on the same cleaned data with
-their tuned defaults applied automatically:
+## Quick start (Colab)
 
 ```python
-from src.training.dispatcher import train_model
-train_model("lsknet", dataset_name="codrone")   # epochs/LR/imgsz/patience auto-tuned
+# one cell: mount Drive, install pinned deps, verify data, launch
+!python training/colab_quickstart.py            # bootstrap + mock smoke test
+!python training/colab_quickstart.py --full     # the whole 23-model benchmark
 ```
 
-Full docs: [training/README.md](training/README.md) ·
-[data_cleaning/README.md](data_cleaning/README.md) ·
-[docs/MODEL_TUNING_GUIDE.md](docs/MODEL_TUNING_GUIDE.md)
-
----
-
-## Directory Structure
-
-```
-minor-project/
-├── requirements.txt            # Core dependencies (torch, torchvision, ultralytics>=8.4.189, scipy, etc.)
-├── install.py                  # Automated installer (prefers uv, falls back to pip)
-├── colab_runner.ipynb          # 1-Click Google Colab GPU runner
-├── README.md                   # Comprehensive documentation and usage guide
-├── data_cleaning/              # NEW: cleaned-dataset build pipeline (v4.1) + EDA tools
-├── training/                   # NEW: YOLO-OBB training/eval on the cleaned data (all generations)
-├── configs/experiments/        # NEW: experiment presets (dataset x model, incl. family sweeps)
-├── scripts/
-│   ├── run_pipeline.py         # Master CLI runner (download -> eval -> metrics -> plots -> report)
-│   ├── download_datasets.py    # Dedicated dataset downloader & manual guide
-│   ├── run_evaluation.py       # Standalone single-model evaluation runner
-│   └── generate_report.py      # Standalone report and plot generator
-├── src/
-│   ├── config.py               # Dataset metadata, classes, thresholds, and paths
-│   ├── data/
-│   │   ├── downloader.py       # Automated dataset downloads & manual fallback guides
-│   │   ├── dataset.py          # Unified OBB dataset reader (YOLO-OBB, DOTA, VisDrone)
-│   │   └── mock_data.py        # Synthetic small-object aerial OBB generator for fast CPU testing
-│   ├── models/
-│   │   ├── base.py             # Base detector interface & latency benchmark
-│   │   ├── yolo_obb.py         # Ultralytics YOLOv8-OBB / YOLO11-OBB wrapper
-│   │   └── custom_obb.py       # Pure PyTorch oriented detector baseline (no C++ extensions)
-│   ├── metrics/
-│   │   ├── detection_map.py    # mAP50, mAP75, mAP50-95, AP_s, AP_m, AP_l (101-point COCO style)
-│   │   ├── confusion_matrix.py # Multi-class confusion matrix with Background FP/FN
-│   │   ├── classification.py   # Accuracy, Precision, Recall, F1, Specificity
-│   │   ├── regression.py       # Angle MAE/RMSE, Pearson correlation r, Spearman rho, R²
-│   │   └── geometry.py         # Rotated polygon IoU, Gaussian GWD & KLD
-│   └── utils/
-│       ├── env.py              # Hardware detection (CPU/CUDA) & seeding
-│       ├── visualizer.py       # Confusion matrix heatmaps, Pearson scatter plots, bar charts
-│       └── reporter.py         # ASCII terminal tables & Markdown report generation
-└── results/                    # Generated output directory (CSVs, JSONs, plots, reports)
-```
-
----
-
-## Installation
-
-Run the automated installer:
-```bash
-python install.py
-```
-Or install via `uv` or `pip`:
-```bash
-uv pip install -r requirements.txt
-# or
-pip install -r requirements.txt
-```
-
----
-
-## Quickstart: Laptop CPU Smoke Test (`--test`)
-
-To test the entire pipeline on a laptop with **no GPU** and **no multi-gigabyte downloads**:
-```bash
-python scripts/run_pipeline.py --test --save-plots
-```
-This runs synthetic aerial scenes through the models, calculates all detection, classification, and regression metrics, generates confusion matrix heatmaps and Pearson scatter plots, and writes a markdown summary table in ~5–10 seconds.
-
----
-
-## Full Evaluation on Datasets
-
-### 1. Check or Download Datasets
-```bash
-# Check dataset status and view manual instructions:
-python scripts/download_datasets.py --check-only
-
-# Download automated datasets (e.g. VisDrone):
-python scripts/download_datasets.py --datasets visdrone
-```
-
-> **Manual Downloads**:
-> - **CODrone (2025)**: Hosted on Google Drive / Baidu via [GitHub](https://github.com/AHideoKuzeA/CODrone). Place extracted files under `data/codrone/`.
-> - **DOTA**: Hosted on Baidu / Google Drive via [DOTA Official Site](https://captain-whu.github.io/DOTA/dataset.html). Place extracted files under `data/dota/`.
-
-### 2. Run Comprehensive Multi-Model Benchmark
-```bash
-python scripts/run_pipeline.py \
-    --datasets codrone visdrone \
-    --models yolov8n-obb custom-obb \
-    --device auto \
-    --save-plots
-```
-
-### 3. Run on Google Colab with GPU
-Open [colab_runner.ipynb](file:///home/illionar/Projects/minor-project/colab_runner.ipynb) in Google Colab, select a **T4 GPU** runtime, and run all cells.
-
----
-
-## Metrics Computed
-
-| Category | Metric | Description |
-|---|---|---|
-| **Detection** | `mAP@0.50` | Standard detection accuracy at 0.50 IoU. |
-| | `mAP@0.75` | Strict localization accuracy measuring angular alignment. |
-| | `mAP@0.50:0.95` | Mean AP averaged across 10 IoU thresholds (0.50 to 0.95). |
-| | `AP_s`, `AP_m`, `AP_l` | Scale-specific AP for small ($<32^2$), medium ($32^2–96^2$), and large ($>96^2$) objects. |
-| **Classification** | `Confusion Matrix` | $(K+1) \times (K+1)$ matrix including explicit **Background** false alarms and misses. |
-| | `Precision` & `Recall` | True Positive rate and precision per category and macro-average. |
-| | `F1-Score` | Harmonic mean of Precision and Recall. |
-| | `Accuracy` | Overall classification accuracy over matched targets. |
-| | `Specificity` | True Negative rate across categories. |
-| **Regression** | `Angle MAE` & `RMSE` | Mean and root-mean-squared angular error (°) modulo $180^\circ$. |
-| | `Pearson r` | Linear correlation between ground-truth and predicted orientation angles. |
-| | `Spearman ρ` | Monotonic rank correlation of orientation. |
-| | `R² Score` | Coefficient of determination for heading angle regression. |
-| | `Center Offset Error` | Euclidean pixel offset between ground truth and predicted center coordinates. |
-| | `Aspect Ratio Fit` | $R^2$ and Pearson correlation for width-to-height ratio preservation. |
-| **Operational** | `FPS` & `Latency` | Inference throughput and per-image latency (ms). |
-| | `Parameters (M)` | Model size in millions of trainable weights. |
-
----
-
-## Logging, Run Tracking & Result Exports
-
-Every run (pipeline and cross-dataset evaluation) automatically writes three
-forensic files under `<results_dir>/run_logs/<run_id>/`:
-
-- `console.log` — a complete mirror of all console output,
-- `events.jsonl` — structured events (`run_start`, `stage_start/end`,
-  `job_start/end` per model×dataset with metrics and durations, `error`,
-  `run_end`), so you can reconstruct exactly what happened at every minute,
-- `run_config.json` — an immutable snapshot of the run's exact configuration.
-
-Additional tooling:
+Equivalent local flow:
 
 ```bash
-# Cross-dataset evaluation (no training): every trained checkpoint on every dataset
-python scripts/cross_dataset_eval.py --data-dir ... --weights-dir ... \
-    --results-dir ... --run-name cross_eval_20ep --device cuda --match-mode common
-
-# Consolidate ALL results (incl. cross-dataset) into excel-ready master CSVs
-python scripts/export_results.py --extra-dirs <path-to-cross-eval-run>
-
-# Compress old run folders into archives/ to keep the repo GitHub-friendly
-python scripts/archive_results.py --dry-run
+python install.py                          # pinned deps (idempotent)
+python training/run.py --env               # environment report for bug reports
+python training/run.py --models all --datasets mock \
+    --steps stage,train,eval,summary --test   # no-GPU/no-data smoke gate
+python training/run.py --models lsknet --datasets codrone   # tuned defaults, no flags needed
+python training/run.py --models all --datasets all --mode full
 ```
 
-Full documentation: [docs/RESULTS_AND_LOGGING.md](docs/RESULTS_AND_LOGGING.md).
+## The unified pipeline
+
+`training/run.py` is the single entry point. Steps are composable:
+
+```
+--steps stage,train,eval,cross,summary,export,report
+--mode  full | train | eval        # presets
+```
+
+- `--models all` or any mix of names + aliases: `yolo`, `dense`, `detr`,
+  `yolov8`, `yolo11`, `yolo26`, `nano`, `small`, `medium`, `large`.
+- `--datasets codrone|visdrone|dota|all|mock`.
+- Datasets are **staged once** to fast local disk in the background while
+  training already reads them (atomic copies, byte-verified, W2).
+- Jobs run **small models first** (`--order bigfirst` inverts) so a dying
+  Colab session banks results early.
+- **One model crashing never kills the suite**: failures are caught, logged
+  with tracebacks into `runs/pipeline_state.json` + the run's
+  `run_manifest.json`, and the run continues.
+- **Auto-resume** (default): a relaunch replays only unfinished jobs and each
+  engine resumes from `last.pt` (optimizer/scaler/EMA/RNG included).
+- `--mirror-dir` mirrors manifests, results.csv and weights to Drive every
+  `--mirror-every` epochs (default 5).
+- `--test` smoke mode: 1 epoch, 2 batches, imgsz 160, workers 0; with
+  `--datasets mock` it needs no GPU and no data.
+- `--version` / `--env`: version, git commit, torch/CUDA/GPU, dataset
+  availability — the header for every bug report.
+
+Per-model tuned defaults (epochs, LR, resolution, batch, patience, warmup)
+live **only** in `src/training/dispatcher.py::MODEL_TUNING`; any explicit CLI
+flag overrides them. See `docs/MODEL_TUNING_GUIDE.md`.
+
+## Legacy entry points (still work, print a deprecation notice)
+
+`training/train.py`, `scripts/run_pipeline.py`, `scripts/train.py`,
+`scripts/run_evaluation.py`, `scripts/cross_dataset_eval.py`,
+`scripts/stage_data.py` are thin shims over the unified pipeline.
+
+## Outputs
+
+Each run writes `runs/train/<dataset>_<model>/` with `weights/best.pt`,
+`weights/last.pt`, `results.csv` (per-epoch losses, val mAP50/mAP50-95,
+imgs/s, GPU mem), `run_manifest.json`, and `eval_<dataset>_<split>.json`
+after evaluation. Suite-level: `runs/summary.csv|md`,
+`results/master_summary.csv`, `runs/train/cross_eval.csv|md|json` +
+heatmap. See `docs/RESULTS_AND_LOGGING.md`.
+
+## Repo map
+
+```
+training/run.py          unified pipeline (start here)
+training/staging.py      background Drive->local staging (python -m training.staging)
+training/evaluate.py     one evaluator for all families
+training/cross_eval.py   cross-dataset matrix + heatmap
+training/summarize_runs.py  master summary table
+src/config.py            canonical 23-model registry + dataset config
+src/training/            dispatcher + yolo/dense/detr engines
+src/metrics/             rotated IoU, mAP, NMS (the only metric code)
+docs/                    pipeline, tuning, results/logging guides
+tests/test_v4_units.py   CPU unit tests (registry, decode, mAP, augmentation)
+```

@@ -428,11 +428,13 @@ def train_dense_model(
     train_raw = AerialOBBDataset(dataset_name=dataset_name, data_dir=data_dir,
                                  split="train", max_samples=max_train_samples,
                                  use_cache=use_ann_cache, ram_cache=ram_cache,
-                                 disk_cache_dir=disk_cache_dir)
+                                 disk_cache_dir=disk_cache_dir,
+                                 workers=workers)
     val_raw = AerialOBBDataset(dataset_name=dataset_name, data_dir=data_dir,
                                split="val", max_samples=max_val_samples,
                                use_cache=use_ann_cache, ram_cache=ram_cache,
-                               disk_cache_dir=disk_cache_dir)
+                               disk_cache_dir=disk_cache_dir,
+                               workers=workers)
     if staging is not None:
         # W2 fix (review A1): source-rooted inventory + staged-or-source
         # reads with a cross-process miss counter. The dataset is built from

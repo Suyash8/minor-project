@@ -86,6 +86,7 @@ class AerialOBBDataset:
         use_cache: bool = True,
         ram_cache: bool = False,
         disk_cache_dir: Optional[str] = None,
+        workers: int = 1,
     ):
         self.dataset_name = dataset_name.lower()
         self.data_dir = Path(data_dir) / self.dataset_name
@@ -111,12 +112,11 @@ class AerialOBBDataset:
         self._ann_cache: Optional[List[Optional[Dict[str, Any]]]] = None
         # W3.7 `--cache ram`: decoded images cached in RAM, bounded by a
         # fraction of currently-free memory (psutil when available, sysconf
-        # otherwise) so a big dataset degrades to plain streaming instead of
-        # OOMing the box.
+        # otherwise) divided by DataLoader workers so multiprocessing never OOMs.
         self.ram_cache = ram_cache
         self._img_cache: Dict[int, np.ndarray] = {}
         self._img_cache_bytes = 0
-        self._img_cache_budget = self._ram_budget_bytes() if ram_cache else 0
+        self._img_cache_budget = self._ram_budget_bytes(workers) if ram_cache else 0
         # W3.7 `--cache disk` (review: must be a REAL tier, not an alias of
         # `annotations`): decoded image arrays persist as .npy on fast local
         # disk (the staging root), so later epochs/models skip both the
@@ -584,21 +584,24 @@ class AerialOBBDataset:
         return gt_by_class
 
     @staticmethod
-    def _ram_budget_bytes() -> int:
-        """RAM-cache budget: 25% of currently available memory."""
+    def _available_system_ram_bytes() -> int:
         try:
             import psutil
-            return int(psutil.virtual_memory().available * 0.25)
-        except ImportError:
+            return int(psutil.virtual_memory().available)
+        except Exception:
             try:
-                return int(os.sysconf("SC_AVPHYS_PAGES")
-                           * os.sysconf("SC_PAGE_SIZE") * 0.25)
-            except (ValueError, OSError, AttributeError):
-                print("[dataset] ram_cache requested but free memory is "
-                      "undeterminable (no psutil/sysconf) - RAM image cache "
-                      "disabled, annotations cache still active",
-                      file=sys.stderr)
+                return int(os.sysconf("SC_AVPHYS_PAGES") * os.sysconf("SC_PAGE_SIZE"))
+            except Exception:
                 return 0
+
+    @classmethod
+    def _ram_budget_bytes(cls, workers: int = 1) -> int:
+        """RAM-cache budget: bounded safe fraction (<=20% total) divided across workers."""
+        avail = cls._available_system_ram_bytes()
+        if avail <= 0:
+            return 0
+        w = max(1, workers)
+        return int((avail * 0.20) / w)
 
     def get_image_array(self, idx: int) -> np.ndarray:
         """Load sample idx as an (H, W, 3) uint8 RGB array.
@@ -633,8 +636,10 @@ class AerialOBBDataset:
         if self.ram_cache and self._img_cache_budget > 0:
             nbytes = int(arr.nbytes)
             if self._img_cache_bytes + nbytes <= self._img_cache_budget:
-                self._img_cache[idx] = arr
-                self._img_cache_bytes += nbytes
+                # Dynamic system memory safety check: never allow free memory to drop below 4 GiB
+                if self._available_system_ram_bytes() > 4 * (1024 ** 3):
+                    self._img_cache[idx] = arr
+                    self._img_cache_bytes += nbytes
         if disk_path is not None:
             try:
                 self.disk_cache_dir.mkdir(parents=True, exist_ok=True)

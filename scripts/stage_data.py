@@ -18,10 +18,11 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 import shutil
 import argparse
 from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ==============================================================================
 # CONFIGURATION ARRAY: Comment out / edit the datasets you want to stage.
@@ -81,10 +82,26 @@ def stage_single_dataset(
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src_file, target)
 
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        list(executor.map(_copy_worker, files_to_copy))
+    completed = 0
+    total = len(files_to_copy)
+    start_time = time.time()
 
-    print(f"[✓] Successfully staged '{ds_name}': {len(files_to_copy)} files copied.")
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = [executor.submit(_copy_worker, f) for f in files_to_copy]
+        for f in as_completed(futures):
+            completed += 1
+            if completed % 250 == 0 or completed == total:
+                elapsed = time.time() - start_time
+                pct = completed / total * 100
+                speed = completed / elapsed if elapsed > 0 else 0
+                remaining = (total - completed) / speed if speed > 0 else 0
+                sys.stdout.write(
+                    f"\r    [{ds_name.upper()}] {completed}/{total} files ({pct:.1f}%) | "
+                    f"{speed:.1f} files/s | ETA: {remaining:.0f}s"
+                )
+                sys.stdout.flush()
+
+    print(f"\n[✓] Successfully staged '{ds_name}': {len(files_to_copy)} files copied in {time.time() - start_time:.1f}s.")
     return True
 
 

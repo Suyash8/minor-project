@@ -40,12 +40,15 @@ SPLITS = ["train", "val", "test"]
 
 def resolve_data_root(explicit: str | None = None) -> str:
     """Where the cleaned datasets live. Priority:
-    explicit arg > $VEHICLE_OBB_DATA > Colab Drive path > repo-local."""
+    explicit arg > $VEHICLE_OBB_DATA > local NVMe > Colab Drive path > repo-local."""
     if explicit:
         return os.path.abspath(os.path.expanduser(explicit))
     env = os.environ.get("VEHICLE_OBB_DATA")
     if env:
         return os.path.abspath(os.path.expanduser(env))
+    local_nvme = "/content/data"
+    if os.path.isdir(local_nvme) and os.listdir(local_nvme):
+        return local_nvme
     drive = "/content/drive/MyDrive/object-detection/cleaned_data"
     if os.path.isdir(drive):
         return drive

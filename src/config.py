@@ -321,6 +321,9 @@ def cleaned_data_root(explicit: Optional[str] = None) -> Path:
     env = os.environ.get("VEHICLE_OBB_DATA")
     if env:
         return Path(env).expanduser().resolve()
+    local_nvme = Path("/content/data")
+    if local_nvme.is_dir() and any(local_nvme.iterdir()):
+        return local_nvme
     drive = Path("/content/drive/MyDrive/object-detection/cleaned_data")
     if drive.is_dir():
         return drive

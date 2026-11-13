@@ -94,6 +94,8 @@ class OrientedFormerNet(nn.Module):
         self.oca = OrientedCrossAttention(embed_dim=embed_dim, num_heads=4)
 
         self.cls_head = nn.Linear(embed_dim, num_classes + 1)
+        nn.init.constant_(self.cls_head.bias, math.log(.01/.99))
+        # Legacy background row retained only for old checkpoint compatibility.
         self.gaussian_reg_head = nn.Linear(embed_dim, 5) # updates to (cx, cy, log(w), log(h), theta_rad)
 
     def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
@@ -104,6 +106,7 @@ class OrientedFormerNet(nn.Module):
         q_pos = self.gpe(g_priors)
 
         queries = self.wsa(q_pos)
+        aux = {"cls_logits": self.cls_head(queries), "boxes": g_priors+self.gaussian_reg_head(queries)}
         queries = self.oca(queries, feats)
 
         cls_logits = self.cls_head(queries)
@@ -111,6 +114,7 @@ class OrientedFormerNet(nn.Module):
         final_boxes = g_priors + delta_g
 
         return {
+            "aux_outputs": [aux],
             "cls_logits": cls_logits,
             "boxes": final_boxes,
         }
@@ -133,7 +137,7 @@ class OrientedFormerDetector(BaseOBBDetector):
         self.net.eval()
 
         if weights_path and Path(weights_path).exists():
-            checkpoint = torch.load(weights_path, map_location=self.device)
+            checkpoint = torch.load(weights_path, map_location=self.device, weights_only=False)
             state = checkpoint.get("model_state", checkpoint) if isinstance(checkpoint, dict) else checkpoint
             self.net.load_state_dict(state, strict=False)
 
@@ -163,7 +167,7 @@ class OrientedFormerDetector(BaseOBBDetector):
 
         with torch.no_grad():
             outputs = self.net(batch_tensor)
-            cls_probs = F.softmax(outputs["cls_logits"], dim=-1)[..., :num_classes] # (B, Q, num_classes)
+            cls_probs = outputs["cls_logits"][..., :num_classes].sigmoid() # (B, Q, num_classes)
             boxes_out = outputs["boxes"] # (B, Q, 5)
 
             for b_idx in range(len(images)):

@@ -75,6 +75,8 @@ class RioDETRNet(nn.Module):
 
         # Decoupled heads
         self.cls_head = nn.Linear(embed_dim, num_classes + 1)
+        nn.init.constant_(self.cls_head.bias, math.log(.01/.99))
+        # Legacy background row retained only for old checkpoint compatibility.
         self.box_head = nn.Sequential(
             nn.Linear(embed_dim, embed_dim),
             nn.ReLU(),
@@ -94,6 +96,9 @@ class RioDETRNet(nn.Module):
         angle_rad = torch.atan2(init_angles[..., 0:1], init_angles[..., 1:2])
 
         # Rotation-Rectified Orthogonal Attention
+        # Previously memory was unused: predictions were image-independent.
+        queries = queries + memory.mean(dim=1, keepdim=True)
+        aux = {"cls_logits": self.cls_head(queries), "box_norm": self.box_head(queries).sigmoid(), "angle_vec": self.angle_head(queries)}
         refined = self.rroa(queries, angle_rad)
 
         cls_logits = self.cls_head(refined)
@@ -101,6 +106,7 @@ class RioDETRNet(nn.Module):
         final_angles = self.angle_head(refined)
 
         return {
+            "aux_outputs": [aux],
             "cls_logits": cls_logits,
             "box_norm": box_norm,
             "angle_vec": final_angles,
@@ -124,7 +130,7 @@ class RioDETRDetector(BaseOBBDetector):
         self.net.eval()
 
         if weights_path and Path(weights_path).exists():
-            checkpoint = torch.load(weights_path, map_location=self.device)
+            checkpoint = torch.load(weights_path, map_location=self.device, weights_only=False)
             state = checkpoint.get("model_state", checkpoint) if isinstance(checkpoint, dict) else checkpoint
             self.net.load_state_dict(state, strict=False)
 
@@ -154,7 +160,7 @@ class RioDETRDetector(BaseOBBDetector):
 
         with torch.no_grad():
             outputs = self.net(batch_tensor)
-            cls_probs = F.softmax(outputs["cls_logits"], dim=-1)[..., :num_classes] # (B, Q, num_classes)
+            cls_probs = outputs["cls_logits"][..., :num_classes].sigmoid() # (B, Q, num_classes)
             box_norm = outputs["box_norm"] # (B, Q, 4)
             angle_vec = outputs["angle_vec"] # (B, Q, 2)
 

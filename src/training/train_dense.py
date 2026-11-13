@@ -38,6 +38,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
+from src.training.schedule import ContinuousCosineLR
 from src.config import resolve_pipeline_paths
 from src.data.augment import AugmentConfig
 from src.data.dataset import AerialOBBDataset
@@ -316,16 +317,11 @@ def validate_dense(
         if compute_map:
             decoded = decode_dense_grid(cls_logits.float(), reg_preds.float(),
                                         img_size=img_size, conf_thresh=conf_thresh)
-            all_pred.extend(to_metric_format(decoded, num_classes))
-            for tgt in targets:
-                gt_img = [{"boxes": np.zeros((0, 5), dtype=np.float32)}
-                          for _ in range(num_classes)]
-                for box, lbl in zip(tgt["boxes"].numpy(), tgt["labels"].numpy()):
-                    if 0 <= int(lbl) < num_classes:
-                        gt_img[int(lbl)]["boxes"] = np.append(
-                            gt_img[int(lbl)]["boxes"],
-                            np.array([box], dtype=np.float32), axis=0)
-                all_gt.append(gt_img)
+            from src.training.metric_protocol import original_metric_batch
+            gt_batch, pred_batch = original_metric_batch(decoded, targets,
+                val_loader.dataset, img_size, num_classes)
+            all_gt.extend(gt_batch)
+            all_pred.extend(pred_batch)
 
     val_loss = val_loss / max(n_batches, 1)
     if compute_map and all_gt:
@@ -495,8 +491,7 @@ def train_dense_model(
 
     criterion = OBBMaskLoss().to(dev)
     optimizer = torch.optim.AdamW(net.parameters(), lr=lr, weight_decay=weight_decay)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=epochs, eta_min=1e-5)
+    scheduler = ContinuousCosineLR(optimizer, T_max=epochs, eta_min=1e-5)
     amp = AmpContext(dev)
     ema_tracker = ModelEMA(net) if ema else None
 
@@ -573,16 +568,11 @@ def train_dense_model(
             if start_epoch > epochs:
                 print(f"[*] Checkpoint already reached epoch {ckpt_epoch} >= target "
                       f"{epochs}. Nothing to do for '{model_name}'.")
-            elif getattr(scheduler, "T_max", epochs) != epochs:
-                print(f"[resume] adjusting cosine schedule: T_max {getattr(scheduler, 'T_max', epochs)} -> {epochs}")
-                scheduler.T_max = epochs
-                eta_min = getattr(scheduler, "eta_min", 1e-5)
-                target_lr = eta_min + 0.5 * (lr - eta_min) * (1.0 + math.cos(math.pi * ckpt_epoch / max(1, epochs)))
-                for g in optimizer.param_groups:
-                    g["lr"] = target_lr
-                print(f"[resume] continuous cosine LR set to {target_lr:.2e} for epoch {start_epoch}")
+            scheduler.resume_at(ckpt_epoch, warm_restart=bool(kwargs.get("warm_restart", False)))
+            print(f"[resume] cosine epoch {ckpt_epoch}/{epochs}, lr={scheduler.get_last_lr()}")
+
         except Exception as e:
-            print(f"[!] Could not resume from checkpoint: {e}. Starting fresh.")
+            raise RuntimeError(f"Checkpoint resume failed, refusing a partially restored run: {e}") from e
 
     # 5. Training Loop
     total_train_start = time.time()
@@ -940,7 +930,7 @@ def train_dense_model(
                   f"improvement for {patience} epochs")
             break
 
-    mirror.flush()
+    mirror_errors = mirror.finish()
     total_time = time.time() - total_train_start
     print(f"\n[✓] Dense Training Completed in {total_time:.1f}s "
           f"({total_time / 60:.1f} min) | OOM recoveries: {oom_events}")
@@ -952,11 +942,12 @@ def train_dense_model(
         "dataset_name": dataset_name,
         "best_weights": str(best_weights_path),
         "last_weights": str(last_weights_path),
-        "epochs_trained": epochs,
+        "epochs_trained": max((int(row.get("epoch", 0)) for row in history), default=start_epoch-1),
         "best_map50": best_map50,
         "best_val_loss": best_val_loss,
         "oom_events": oom_events,
         "history": history,
+        "mirror_errors": mirror_errors,
         "run_dir": str(run_path),
         "resolved_config": config_snapshot,
     }

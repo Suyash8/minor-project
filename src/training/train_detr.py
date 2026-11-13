@@ -40,6 +40,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from scipy.optimize import linear_sum_assignment
 
+from src.training.schedule import ContinuousCosineLR
 from src.config import resolve_pipeline_paths
 from src.data.augment import AugmentConfig
 from src.data.dataset import AerialOBBDataset
@@ -118,174 +119,7 @@ def extract_detr_predictions(
         raise ValueError(f"Unrecognized output format for DETR model: {list(outputs.keys())}")
 
 
-class HungarianOBBMatcher(nn.Module):
-    """
-    Computes bipartite assignment between predicted object queries and ground-truth targets.
-    Cost = Cost_class + Cost_box + Cost_angle
-    """
-
-    def __init__(self, cost_class: float = 1.0, cost_bbox: float = 5.0, cost_angle: float = 2.0):
-        super().__init__()
-        self.cost_class = cost_class
-        self.cost_bbox = cost_bbox
-        self.cost_angle = cost_angle
-
-    @torch.no_grad()
-    def forward(
-        self,
-        pred_logits: torch.Tensor,
-        pred_boxes: torch.Tensor,
-        pred_angles: torch.Tensor,
-        targets: List[Dict[str, torch.Tensor]],
-        img_size: int,
-    ) -> List[Tuple[torch.Tensor, torch.Tensor]]:
-        """
-        Returns list of (query_indices, target_indices) for each image in the batch.
-        """
-        B, Q, num_classes_p1 = pred_logits.shape
-        indices = []
-
-        prob = F.softmax(pred_logits, dim=-1)
-
-        for b in range(B):
-            tgt_boxes = targets[b]["boxes"]
-            tgt_labels = targets[b]["labels"]
-
-            if len(tgt_labels) == 0:
-                indices.append((
-                    torch.empty(0, dtype=torch.int64, device=pred_logits.device),
-                    torch.empty(0, dtype=torch.int64, device=pred_logits.device),
-                ))
-                continue
-
-            tgt_b_norm = torch.zeros((len(tgt_boxes), 4), device=pred_boxes.device)
-            tgt_b_norm[:, 0] = tgt_boxes[:, 0] / float(img_size)
-            tgt_b_norm[:, 1] = tgt_boxes[:, 1] / float(img_size)
-            tgt_b_norm[:, 2] = tgt_boxes[:, 2] / float(img_size)
-            tgt_b_norm[:, 3] = tgt_boxes[:, 3] / float(img_size)
-
-            tgt_ang_rad = torch.deg2rad(tgt_boxes[:, 4:5]).to(pred_angles.device)
-
-            cost_class = -prob[b, :, tgt_labels.to(pred_logits.device)]  # (Q, M)
-            cost_bbox = torch.cdist(pred_boxes[b], tgt_b_norm, p=1)  # (Q, M)
-            diff_ang = 2.0 * (pred_angles[b] - tgt_ang_rad.T)  # (Q, M)
-            cost_angle = 1.0 - torch.cos(diff_ang)
-
-            cost_matrix = (
-                self.cost_class * cost_class +
-                self.cost_bbox * cost_bbox +
-                self.cost_angle * cost_angle
-            ).cpu().numpy()
-
-            q_ind, t_ind = linear_sum_assignment(cost_matrix)
-            indices.append((
-                torch.as_tensor(q_ind, dtype=torch.int64, device=pred_logits.device),
-                torch.as_tensor(t_ind, dtype=torch.int64, device=pred_logits.device),
-            ))
-
-        return indices
-
-
-class DETROBBLoss(nn.Module):
-    """
-    DETR Loss for Oriented Object Detection:
-      - Cross Entropy on all queries (matched -> target class, unmatched -> background)
-      - Smooth L1 Loss on matched normalized coordinates (cx, cy, w, h)
-      - Continuous Circular Trigonometric Loss on matched angles (sin, cos)
-    """
-
-    def __init__(self, num_classes: int, loss_class: float = 1.0,
-                 loss_bbox: float = 5.0, loss_angle: float = 2.5):
-        super().__init__()
-        self.num_classes = num_classes
-        self.loss_class = loss_class
-        self.loss_bbox = loss_bbox
-        self.loss_angle = loss_angle
-        self.matcher = HungarianOBBMatcher()
-
-    def forward(
-        self,
-        pred_logits: torch.Tensor,
-        pred_boxes: torch.Tensor,
-        pred_angles: torch.Tensor,
-        targets: List[Dict[str, torch.Tensor]],
-        img_size: int,
-    ) -> Dict[str, torch.Tensor]:
-        B, Q, num_classes_p1 = pred_logits.shape
-        bg_idx = self.num_classes
-
-        indices = self.matcher(pred_logits, pred_boxes, pred_angles, targets, img_size)
-
-        target_classes = torch.full((B, Q), bg_idx, dtype=torch.int64,
-                                    device=pred_logits.device)
-        for b, (q_idx, t_idx) in enumerate(indices):
-            if len(q_idx) > 0:
-                tgt_lbls = targets[b]["labels"].to(pred_logits.device)
-                target_classes[b, q_idx] = tgt_lbls[t_idx]
-
-        cls_loss = F.cross_entropy(pred_logits.view(-1, num_classes_p1),
-                                   target_classes.view(-1))
-
-        box_losses = []
-        angle_losses = []
-        num_matched = 0
-
-        for b, (q_idx, t_idx) in enumerate(indices):
-            if len(q_idx) == 0:
-                continue
-
-            num_matched += len(q_idx)
-            m_pred_box = pred_boxes[b, q_idx]
-            m_pred_ang = pred_angles[b, q_idx]
-
-            raw_boxes = targets[b]["boxes"].to(pred_logits.device)[t_idx]
-            tgt_b_norm = torch.zeros_like(m_pred_box)
-            tgt_b_norm[:, 0] = raw_boxes[:, 0] / float(img_size)
-            tgt_b_norm[:, 1] = raw_boxes[:, 1] / float(img_size)
-            tgt_b_norm[:, 2] = raw_boxes[:, 2] / float(img_size)
-            tgt_b_norm[:, 3] = raw_boxes[:, 3] / float(img_size)
-
-            tgt_ang_rad = torch.deg2rad(raw_boxes[:, 4:5])
-
-            box_losses.append(F.smooth_l1_loss(m_pred_box, tgt_b_norm, reduction="sum"))
-
-            sin_p, cos_p = torch.sin(2.0 * m_pred_ang), torch.cos(2.0 * m_pred_ang)
-            sin_t, cos_t = torch.sin(2.0 * tgt_ang_rad), torch.cos(2.0 * tgt_ang_rad)
-            angle_losses.append(
-                F.mse_loss(sin_p, sin_t, reduction="sum") +
-                F.mse_loss(cos_p, cos_t, reduction="sum"))
-
-        denom = max(num_matched, 1)
-        box_loss = (torch.stack(box_losses).sum() / denom) if box_losses else torch.tensor(0.0, device=pred_logits.device)
-        angle_loss = (torch.stack(angle_losses).sum() / denom) if angle_losses else torch.tensor(0.0, device=pred_logits.device)
-
-        total_loss = (
-            self.loss_class * cls_loss +
-            self.loss_bbox * box_loss +
-            self.loss_angle * angle_loss
-        )
-
-        # Real query-collapse signals (review C): Hungarian matching always
-        # matches min(Q, M) queries, so matched==0 can never fire. Track
-        # signals that CAN fire: the fraction of queries predicting
-        # background, and the mean max foreground probability of the matched
-        # queries (collapse drives it toward 0).
-        with torch.no_grad():
-            probs = pred_logits.softmax(-1)
-            bg_fraction = float((probs[..., bg_idx] > 0.5).float().mean())
-            fg = [probs[b, q_idx, :bg_idx].max(-1).values.mean()
-                  for b, (q_idx, t_idx) in enumerate(indices) if len(q_idx) > 0]
-            matched_fg_prob = float(torch.stack(fg).mean()) if fg else 0.0
-
-        return {
-            "total_loss": total_loss,
-            "cls_loss": cls_loss.detach(),
-            "box_loss": box_loss.detach(),
-            "angle_loss": angle_loss.detach(),
-            "matched_queries": num_matched,
-            "bg_fraction": bg_fraction,
-            "matched_fg_prob": matched_fg_prob,
-        }
+from src.training.detr_loss import HungarianOBBMatcher, DETROBBLoss
 
 
 @torch.no_grad()
@@ -318,7 +152,7 @@ def validate_detr(
             pred_logits, pred_boxes, pred_angles = extract_detr_predictions(
                 outputs, model_name=model_name)
             v_losses = criterion(pred_logits, pred_boxes, pred_angles, targets,
-                                 img_size=img_size)
+                                 img_size=img_size, aux_outputs=outputs.get("aux_outputs"), model_name=model_name)
         val_loss += float(v_losses["total_loss"])
         n_batches += 1
 
@@ -326,16 +160,11 @@ def validate_detr(
             decoded = decode_detr(pred_logits.float(), pred_boxes.float(),
                                   pred_angles.float(), img_size=img_size,
                                   num_classes=num_classes, conf_thresh=conf_thresh)
-            all_pred.extend(to_metric_format(decoded, num_classes))
-            for tgt in targets:
-                gt_img = [{"boxes": np.zeros((0, 5), dtype=np.float32)}
-                          for _ in range(num_classes)]
-                for box, lbl in zip(tgt["boxes"].numpy(), tgt["labels"].numpy()):
-                    if 0 <= int(lbl) < num_classes:
-                        gt_img[int(lbl)]["boxes"] = np.append(
-                            gt_img[int(lbl)]["boxes"],
-                            np.array([box], dtype=np.float32), axis=0)
-                all_gt.append(gt_img)
+            from src.training.metric_protocol import original_metric_batch
+            gt_batch, pred_batch = original_metric_batch(decoded, targets,
+                val_loader.dataset, img_size, num_classes)
+            all_gt.extend(gt_batch)
+            all_pred.extend(pred_batch)
 
     val_loss = val_loss / max(n_batches, 1)
     if compute_map and all_gt:
@@ -497,21 +326,8 @@ def train_detr_model(
     criterion = DETROBBLoss(num_classes=num_classes).to(dev)
     optimizer = torch.optim.AdamW(net.parameters(), lr=lr, weight_decay=weight_decay)
     warmup_epochs = max(0, min(int(warmup_epochs), epochs - 1))
-    base_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=max(1, epochs - warmup_epochs), eta_min=1e-6)
-    if warmup_epochs > 0:
-        scheduler = torch.optim.lr_scheduler.SequentialLR(
-            optimizer,
-            schedulers=[
-                torch.optim.lr_scheduler.LinearLR(
-                    optimizer, start_factor=0.01, end_factor=1.0,
-                    total_iters=warmup_epochs),
-                base_scheduler,
-            ],
-            milestones=[warmup_epochs],
-        )
-    else:
-        scheduler = base_scheduler
+    scheduler = ContinuousCosineLR(optimizer, T_max=epochs, eta_min=1e-6,
+                                   warmup_epochs=warmup_epochs)
 
     amp = AmpContext(dev)
     ema_tracker = ModelEMA(net) if ema else None
@@ -559,6 +375,8 @@ def train_detr_model(
     if resume and last_weights_path.exists():
         try:
             ckpt = torch.load(last_weights_path, map_location=dev, weights_only=False)
+            if ckpt.get("head_semantics") != "sigmoid-focal-v4.2":
+                print("[resume][WARNING] legacy softmax checkpoint: retaining weights/moments but switching foreground calibration to sigmoid focal; reconvergence required")
             missing, unexpected = net.load_state_dict(ckpt["model_state"],
                                                       strict=False)
             if missing or unexpected:
@@ -585,23 +403,11 @@ def train_detr_model(
             if start_epoch > epochs:
                 print(f"[*] Checkpoint already reached epoch {ckpt_epoch} >= target "
                       f"{epochs}. Nothing to do for '{model_name}'.")
-            else:
-                target_cos_max = max(1, epochs - warmup_epochs)
-                curr_base = base_scheduler
-                if hasattr(scheduler, "_schedulers") and len(scheduler._schedulers) > 1:
-                    curr_base = scheduler._schedulers[1]
-                if getattr(curr_base, "T_max", target_cos_max) != target_cos_max:
-                    print(f"[resume] adjusting DETR cosine schedule: T_max {getattr(curr_base, 'T_max', target_cos_max)} -> {target_cos_max}")
-                    curr_base.T_max = target_cos_max
-                    if ckpt_epoch >= warmup_epochs:
-                        cur_cos_step = ckpt_epoch - warmup_epochs
-                        eta_min = getattr(curr_base, "eta_min", 1e-6)
-                        target_lr = eta_min + 0.5 * (lr - eta_min) * (1.0 + math.cos(math.pi * cur_cos_step / max(1, target_cos_max)))
-                        for g in optimizer.param_groups:
-                            g["lr"] = target_lr
-                        print(f"[resume] continuous DETR LR set to {target_lr:.2e} for epoch {start_epoch}")
+            scheduler.resume_at(ckpt_epoch, warm_restart=bool(kwargs.get("warm_restart", False)))
+            print(f"[resume] cosine epoch {ckpt_epoch}/{epochs}, lr={scheduler.get_last_lr()}")
+
         except Exception as e:
-            print(f"[!] Could not resume from checkpoint: {e}. Starting fresh.")
+            raise RuntimeError(f"Checkpoint resume failed, refusing a partially restored run: {e}") from e
 
     # 5. Training Loop
     total_train_start = time.time()
@@ -618,7 +424,7 @@ def train_detr_model(
             pred_logits, pred_boxes, pred_angles = extract_detr_predictions(
                 outputs, model_name=model_name)
             losses = criterion(pred_logits, pred_boxes, pred_angles, step_targets,
-                               img_size=img_size)
+                               img_size=img_size, aux_outputs=outputs.get("aux_outputs"), model_name=model_name)
             # grad_weight (review A4): an OOM-split half of size n_half must
             # contribute n_half/n of the full-batch mean gradient.
             loss = losses["total_loss"] * grad_weight / accum_steps
@@ -816,6 +622,7 @@ def train_detr_model(
                 dataset_name=dataset_name, model_state=net.state_dict(),
                 optimizer_state=optimizer.state_dict(),
                 scheduler_state=scheduler.state_dict(),
+            head_semantics="sigmoid-focal-v4.2",
                 scaler_state=amp.state_dict(),
                 ema=(ema_tracker.state_dict() if ema_tracker is not None else None),
                 rng=rng_state_dict(),
@@ -932,6 +739,7 @@ def train_detr_model(
             model_state=net.state_dict(),
             optimizer_state=optimizer.state_dict(),
             scheduler_state=scheduler.state_dict(),
+            head_semantics="sigmoid-focal-v4.2",
             scaler_state=amp.state_dict(),
             ema=(ema_tracker.state_dict() if ema_tracker is not None else None),
             rng=rng_state_dict(),
@@ -947,7 +755,7 @@ def train_detr_model(
                 model_state=(ema_tracker.ema_state if ema_tracker is not None
                              else net.state_dict()),
                 best_map50=best_map50, best_val_loss=best_val_loss,
-                num_classes=num_classes, config=config_snapshot)
+                num_classes=num_classes, config=config_snapshot, head_semantics="sigmoid-focal-v4.2")
 
         mirror.submit_epoch(epoch, last_weights_path, logger.csv_path, logger.log_path)
         if is_best:
@@ -958,7 +766,7 @@ def train_detr_model(
                   f"improvement for {patience} epochs")
             break
 
-    mirror.flush()
+    mirror_errors = mirror.finish()
     total_time = time.time() - total_train_start
     print(f"\n[✓] DETR Training Completed in {total_time:.1f}s "
           f"({total_time / 60:.1f} min) | OOM recoveries: {oom_events}")
@@ -970,11 +778,12 @@ def train_detr_model(
         "dataset_name": dataset_name,
         "best_weights": str(best_weights_path),
         "last_weights": str(last_weights_path),
-        "epochs_trained": epochs,
+        "epochs_trained": max((int(row.get("epoch", 0)) for row in history), default=start_epoch-1),
         "best_map50": best_map50,
         "best_val_loss": best_val_loss,
         "oom_events": oom_events,
         "history": history,
+        "mirror_errors": mirror_errors,
         "run_dir": str(run_path),
         "resolved_config": config_snapshot,
     }

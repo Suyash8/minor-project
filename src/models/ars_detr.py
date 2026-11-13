@@ -119,7 +119,9 @@ class ARSDETRNet(nn.Module):
         ])
 
         # Heads
-        self.class_head = nn.Linear(embed_dim, num_classes + 1) # + background
+        self.class_head = nn.Linear(embed_dim, num_classes + 1)
+        nn.init.constant_(self.class_head.bias, math.log(.01/.99))
+        # Legacy background row retained only for old checkpoint compatibility. # + background
         self.box_head = nn.Sequential(
             nn.Linear(embed_dim, embed_dim),
             nn.ReLU(),
@@ -135,17 +137,20 @@ class ARSDETRNet(nn.Module):
         queries = self.query_embed.weight.unsqueeze(0).repeat(B, 1, 1) # (B, num_queries, C)
         angles = torch.zeros(B, self.num_queries, 1, device=x.device)
 
+        aux_outputs = []
         for layer in self.decoder:
             queries = layer(queries, memory, angles)
             # Iteratively update angle prior
             dang = self.angle_head(queries)
             angles = torch.atan2(dang[..., 0:1], dang[..., 1:2])
+            aux_outputs.append({"cls_logits": self.class_head(queries), "boxes_norm": self.box_head(queries).sigmoid(), "angle_vec": dang})
 
         cls_logits = self.class_head(queries)
         box_norm = torch.sigmoid(self.box_head(queries)) # [0, 1] cx, cy, w, h
         angle_vec = self.angle_head(queries)
 
         return {
+            "aux_outputs": aux_outputs[:-1],
             "cls_logits": cls_logits,
             "boxes_norm": box_norm,
             "angle_vec": angle_vec,
@@ -169,7 +174,7 @@ class ARSDETRDetector(BaseOBBDetector):
         self.net.eval()
 
         if weights_path and Path(weights_path).exists():
-            checkpoint = torch.load(weights_path, map_location=self.device)
+            checkpoint = torch.load(weights_path, map_location=self.device, weights_only=False)
             state = checkpoint.get("model_state", checkpoint) if isinstance(checkpoint, dict) else checkpoint
             self.net.load_state_dict(state, strict=False)
 
@@ -199,7 +204,7 @@ class ARSDETRDetector(BaseOBBDetector):
 
         with torch.no_grad():
             outputs = self.net(batch_tensor)
-            cls_probs = F.softmax(outputs["cls_logits"], dim=-1)[..., :num_classes] # (B, Q, num_classes)
+            cls_probs = outputs["cls_logits"][..., :num_classes].sigmoid() # (B, Q, num_classes)
             boxes_norm = outputs["boxes_norm"] # (B, Q, 4)
             angle_vec = outputs["angle_vec"] # (B, Q, 2)
 

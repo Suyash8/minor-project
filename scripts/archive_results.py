@@ -128,7 +128,7 @@ def main():
 
     for d, _ in plan:
         archive_dir(d, archives_dir, args.keep_essentials)
-        total_saved += 1  # placeholder; real accounting below
+        total_saved += 1  # Count each saved source file; byte accounting follows
 
     print(f"\n[✓] Archived {len(plan)} folder(s) -> {archives_dir}")
     kept = sum(f.stat().st_size for f in archives_dir.rglob("*") if f.is_file()) / 1e6

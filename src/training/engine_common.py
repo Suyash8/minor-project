@@ -184,6 +184,14 @@ def save_training_checkpoint(path: Path, **payload: Any) -> None:
     tmp = path.with_name(path.name + ".tmp")
     torch.save(payload, tmp)
     os.replace(tmp, path)
+    import hashlib
+    with path.open("rb") as f:
+        hasher = hashlib.sha256()
+        for block in iter(lambda: f.read(1024*1024), b""):
+            hasher.update(block)
+        digest = hasher.hexdigest()
+    atomic_save_json({"epoch": payload.get("epoch"), "checkpoint_size": path.stat().st_size, "sha256": digest},
+                     path.with_name(path.name+".progress.json"))
 
 
 def rng_state_dict() -> Dict[str, Any]:
@@ -228,6 +236,7 @@ class DriveMirror:
         self._lock = threading.Lock()
         self._thread: Optional[threading.Thread] = None
         self._stop = False
+        self.errors: List[str] = []
 
     @property
     def active(self) -> bool:
@@ -241,8 +250,22 @@ class DriveMirror:
         (snapshot cleanup)."""
         if not self.active:
             return
+        path = Path(path)
+        progress = path.with_name(path.name+".progress.json")
+        if path.suffix == ".pt" and progress.is_file():
+            self.submit(progress, dest_name=(dest_name or path.name)+".progress.json")
+        if not unlink_after:
+            # All engines need immutable sources, not only YOLO. A later
+            # atomic local save otherwise races a slow mirror's file open.
+            import uuid
+            folder = path.parent / ".mirror_snapshot"
+            folder.mkdir(parents=True, exist_ok=True)
+            snap = folder / f"{path.stem}_{uuid.uuid4().hex}{path.suffix}"
+            shutil.copy2(path, snap)
+            dest_name = dest_name or path.name
+            path, unlink_after = snap, True
         with self._lock:
-            self._queue.append((Path(path), dest_name, unlink_after))
+            self._queue.append((path, dest_name, unlink_after))
             if self._thread is None or not self._thread.is_alive():
                 self._stop = False
                 self._thread = threading.Thread(target=self._drain, daemon=True)
@@ -269,18 +292,40 @@ class DriveMirror:
                 dst = self.mirror_dir / (dest_name or src.name)
                 self.mirror_dir.mkdir(parents=True, exist_ok=True)
                 tmp = dst.with_name(dst.name + ".part")
-                shutil.copy2(src, tmp)
-                os.replace(tmp, dst)
+                for attempt in range(3):
+                    try:
+                        shutil.copy2(src, tmp)
+                        os.replace(tmp, dst)
+                        break
+                    except OSError:
+                        if attempt == 2:
+                            raise
+                        time.sleep(.1 * 2**attempt)
                 if unlink_after:
                     src.unlink(missing_ok=True)
             except Exception as e:
-                print(f"[mirror][warn] {src.name}: {e}")
+                self.errors.append(f"{src.name}: {e}")
+                print(f"[mirror][error] {src.name}: {e}")
 
     def flush(self) -> None:
         with self._lock:
             thread = self._thread
         if thread is not None:
             thread.join(timeout=300)
+            if thread.is_alive():
+                raise TimeoutError("Drive mirror did not drain within 300 seconds")
+        if self.errors:
+            raise RuntimeError("Drive mirror failed: " + "; ".join(self.errors))
+
+
+    def finish(self):
+        """Surface backup failure without discarding local training results."""
+        try:
+            self.flush()
+        except (RuntimeError, TimeoutError) as e:
+            print(f"[mirror][ERROR] local checkpoints are intact, backup incomplete: {e}")
+            return list(self.errors) or [str(e)]
+        return []
 
 
 def restore_from_mirror(mirror_dir: Optional[str], run_subdir: str,
@@ -296,20 +341,26 @@ def restore_from_mirror(mirror_dir: Optional[str], run_subdir: str,
     src_dir = Path(mirror_dir) / run_subdir
     if not src_dir.is_dir():
         return []
+    from training.colab_recovery import restore_checkpoint, backup, reconcile_run, checkpoint_epoch
     restored: List[str] = []
-    for name in ("last.pt", "best.pt", "results.csv", "epochs.jsonl", "train.log"):
-        src = src_dir / name
+    names = ("last.pt", "best.pt", "results.csv", "epochs.jsonl", "train.log", "run_manifest.json")
+    names += tuple(p.name for p in src_dir.glob("eval_*.json"))
+    for name in names:
+        src=src_dir/name
         if not src.is_file():
             continue
-        dst = Path(run_path) / "weights" / name if name.endswith(".pt") \
-            else Path(run_path) / name
+        dst=Path(run_path)/"weights"/name if name.endswith(".pt") else Path(run_path)/name
+        if name=="best.pt":continue  # recovery uses last without atomic bundle proof
+        if name.endswith(".pt"):
+            if restore_checkpoint(src,dst):restored.append(name)
+            continue
         if dst.exists():
-            continue  # never clobber a local checkpoint
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        tmp = dst.with_name(dst.name + ".part")
-        shutil.copy2(src, tmp)
-        os.replace(tmp, dst)
-        restored.append(name)
+            if dst.stat().st_mtime >= src.stat().st_mtime:continue
+            backup(dst)
+        dst.parent.mkdir(parents=True,exist_ok=True)
+        tmp=dst.with_name(dst.name+".part")
+        shutil.copy2(src,tmp);os.replace(tmp,dst);restored.append(name)
+    reconcile_run(src_dir,run_path,"last.pt" in restored or "best.pt" in restored,restored)
     if restored:
         print(f"[mirror] restored from Drive mirror: {', '.join(restored)}")
     return restored

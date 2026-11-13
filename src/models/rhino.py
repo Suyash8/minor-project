@@ -72,6 +72,8 @@ class RHINONet(nn.Module):
         ])
 
         self.cls_head = nn.Linear(embed_dim, num_classes + 1)
+        nn.init.constant_(self.cls_head.bias, math.log(.01/.99))
+        # Legacy background row retained only for old checkpoint compatibility.
         self.box_head = nn.Sequential(
             nn.Linear(embed_dim, embed_dim),
             nn.ReLU(),
@@ -85,14 +87,17 @@ class RHINONet(nn.Module):
         queries = self.query_embed.weight.unsqueeze(0).repeat(B, 1, 1)
 
         queries = self.denoising(queries)
+        aux_outputs = []
         for layer in self.decoder_layers:
             queries = layer(queries, feats)
+            aux_outputs.append({"cls_logits": self.cls_head(queries), "box_norm": self.box_head(queries).sigmoid(), "angle_vec": self.angle_head(queries)})
 
         cls_logits = self.cls_head(queries)
         box_norm = torch.sigmoid(self.box_head(queries))
         angle_vec = self.angle_head(queries)
 
         return {
+            "aux_outputs": aux_outputs[:-1],
             "cls_logits": cls_logits,
             "box_norm": box_norm,
             "angle_vec": angle_vec,
@@ -116,7 +121,7 @@ class RHINODetector(BaseOBBDetector):
         self.net.eval()
 
         if weights_path and Path(weights_path).exists():
-            checkpoint = torch.load(weights_path, map_location=self.device)
+            checkpoint = torch.load(weights_path, map_location=self.device, weights_only=False)
             state = checkpoint.get("model_state", checkpoint) if isinstance(checkpoint, dict) else checkpoint
             self.net.load_state_dict(state, strict=False)
 
@@ -146,7 +151,7 @@ class RHINODetector(BaseOBBDetector):
 
         with torch.no_grad():
             outputs = self.net(batch_tensor)
-            cls_probs = F.softmax(outputs["cls_logits"], dim=-1)[..., :num_classes]
+            cls_probs = outputs["cls_logits"][..., :num_classes].sigmoid()
             box_norm = outputs["box_norm"]
             angle_vec = outputs["angle_vec"]
 

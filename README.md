@@ -1,3 +1,12 @@
+# v4.2 verification status
+
+This revision implements the convergence/optimization changes but does not
+certify real-data convergence or CUDA timing. Read [FINAL_REPORT_V4.md](FINAL_REPORT_V4.md),
+[operations](docs/V42_OPERATIONS.md), and the unresolved
+[class schema conflict](docs/CLASS_SCHEMA_CONFLICT.md) before a real run.
+No labels/checkpoints were silently remapped. The actual master specification
+is preserved in [PROMPT.md](PROMPT.md).
+
 # Aerial OBB Detection & Benchmark Suite (v4)
 
 One pipeline trains, evaluates and compares **23 oriented-object-detection

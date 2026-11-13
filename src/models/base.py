@@ -125,49 +125,10 @@ class BaseOBBDetector(ABC):
         recall_rate: float = 0.80,
         noise_std: float = 2.5,
     ) -> Optional[List[Dict[str, Any]]]:
-        """
-        Shared simulation engine for fast test-mode pipelines when ground_truth_hints are supplied.
-        """
-        if not ground_truth_hints or img_idx >= len(ground_truth_hints):
-            return None
-
-        gt_info = ground_truth_hints[img_idx]
-        img_preds = [{"boxes": [], "scores": []} for _ in range(num_classes)]
-
-        for c in range(min(num_classes, len(gt_info))):
-            gt_boxes = gt_info[c].get("boxes", np.zeros((0, 5)))
-            for box in gt_boxes:
-                if np.random.rand() < recall_rate:
-                    cx = float(box[0] + np.random.normal(0, noise_std))
-                    cy = float(box[1] + np.random.normal(0, noise_std))
-                    bw = float(box[2] * np.random.uniform(0.94, 1.06))
-                    bh = float(box[3] * np.random.uniform(0.94, 1.06))
-                    ang = float((box[4] + np.random.normal(0, noise_std * 1.5)) % 180.0)
-                    sc = float(np.random.uniform(max(conf_thresh, 0.60), 0.96))
-                    img_preds[c]["boxes"].append([cx, cy, bw, bh, ang])
-                    img_preds[c]["scores"].append(sc)
-
-        # Occasional realistic background false positive
-        if np.random.rand() < 0.35:
-            rand_c = np.random.randint(0, num_classes)
-            img_preds[rand_c]["boxes"].append([
-                float(np.random.uniform(orig_w * 0.15, orig_w * 0.85)),
-                float(np.random.uniform(orig_h * 0.15, orig_h * 0.85)),
-                float(np.random.uniform(18.0, 36.0)),
-                float(np.random.uniform(35.0, 75.0)),
-                float(np.random.uniform(0.0, 180.0)),
-            ])
-            img_preds[rand_c]["scores"].append(float(np.random.uniform(conf_thresh, 0.52)))
-
-        for c in range(num_classes):
-            if len(img_preds[c]["boxes"]) > 0:
-                img_preds[c]["boxes"] = np.array(img_preds[c]["boxes"], dtype=np.float32)
-                img_preds[c]["scores"] = np.array(img_preds[c]["scores"], dtype=np.float32)
-            else:
-                img_preds[c]["boxes"] = np.zeros((0, 5), dtype=np.float32)
-                img_preds[c]["scores"] = np.zeros(0, dtype=np.float32)
-
-        return img_preds
+        """Legacy argument is rejected rather than fabricating predictions."""
+        if ground_truth_hints is not None:
+            raise ValueError("Ground-truth hints cannot be used for production inference")
+        return None
 
     def benchmark_latency(
         self,

@@ -356,7 +356,7 @@ def _mock_data_dir() -> str:
     if _MOCK_DIR is None or not os.path.isfile(
             os.path.join(_MOCK_DIR, "mock", "mock.yaml")):
         import tempfile
-        from src.data.mock_data import create_mock_dataset
+        from tests.mock_data import create_mock_dataset
         _MOCK_DIR = tempfile.mkdtemp(prefix="v4mock_")
         create_mock_dataset("mock", Path(_MOCK_DIR), num_train=6, num_val=4)
     return _MOCK_DIR
@@ -651,9 +651,15 @@ def test_yolo_resume_checkpoint_contract() -> None:
     run must load with weights_only=False (torch 2.9 default True rejects
     it), and YOLO(last.pt) construction must succeed for a resume."""
     last_pt = "/tmp/v4runs/train/mock_yolov8n-obb/weights/last.pt"
+    temp = None
     if not os.path.isfile(last_pt):
-        print("[skip] YOLO resume contract: mock checkpoint not present")
-        return
+        import tempfile
+        from src.training.train_yolo import train_yolo_obb
+        temp = tempfile.TemporaryDirectory()
+        result = train_yolo_obb(model_name="yolov8n-obb",dataset_name="mock",epochs=1,
+            batch_size=2,imgsz=64,device="cpu",workers=0,data_dir=_mock_data_dir(),
+            run_dir=temp.name,test_mode=True,resume=False)
+        last_pt = result["last_weights"]
     import torch
     try:
         torch.load(last_pt, map_location="cpu")  # torch>=2.6 default
@@ -668,25 +674,6 @@ def test_yolo_resume_checkpoint_contract() -> None:
     print(f"[ok] YOLO resume contract: weights_only=False load + YOLO() "
           f"construction succeed (default weights_only load "
           f"{'also ok' if default_ok else 'rejected -> pin is required'})")
-
-
-if __name__ == "__main__":
-    test_registry()
-    test_decode_roundtrip()
-    test_map_perfect_and_shifted()
-    test_augment_roundtrip()
-    test_yolo_xywhr_conversion()
-    test_native_fallback_is_explicit()
-    test_real_encoder_roundtrip()
-    test_detr_decode_path()
-    test_staging_e2e_overlap()
-    test_fake_oom_gradient_equivalence()
-    test_ema_warmup_ramp()
-    test_graceful_stop_epoch_numbering_and_resume()
-    test_disk_cache_tier()
-    test_per_model_encoder_coverage()
-    test_yolo_resume_checkpoint_contract()
-    print("\nALL v4 UNIT TESTS PASSED")
 
 
 # ---------------------------------------------------------------------------
@@ -1234,8 +1221,18 @@ def test_mirror_snapshot_destname_and_protocol_guard() -> None:
             "unique snapshot name leaked into the mirror"
 
     assert common.protocol_current({"coord_space": "original image px "
-                                    "(preds inverse-letterbox, GT raw, R3+B1)"})
+                                    "(preds inverse-letterbox, GT raw, R3+B1)",
+                                    "metric_version": common.CURRENT_METRIC_VERSION})
     assert not common.protocol_current({"coord_space": "letterbox(imgsz)"})
     assert not common.protocol_current({})
     assert not common.protocol_current({"coord_space": None})
     print("[ok] mirror snapshot dest_name/unlink_after + protocol guard")
+
+if __name__ == "__main__":
+    import runpy
+    tests = [v for k,v in list(globals().items()) if k.startswith("test_") and callable(v)]
+    for test in tests:
+        test()
+        print("PASS", test.__name__)
+    print(f"ALL {len(tests)} v4 UNIT TESTS EXECUTED AND PASSED")
+    runpy.run_path(str(Path(__file__).with_name("test_v42.py")), run_name="__main__")

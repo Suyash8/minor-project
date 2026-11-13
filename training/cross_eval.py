@@ -7,6 +7,16 @@ TEST split of every cleaned dataset and writes:
   <runs_dir>/cross_eval.csv      rows: run, model, trained_on, eval_on, mAP50, mAP50-95
   <runs_dir>/cross_eval.md       the same as a matrix (mAP50 / mAP50-95)
   <runs_dir>/cross_eval.json     full detail incl. per-class
+  <results_dir>/cross_dataset_matrix.csv      long-form 3x3 transfer matrix
+        (mAP50, mAP50-95, in-domain reference, delta mAP = cross - in-domain)
+  <results_dir>/cross_dataset_summary.md      per-model matrices + mean shift
+  <results_dir>/figures/cross_dataset_heatmap_*.{pdf,svg,png}  seaborn heatmaps
+
+Cells are never invented: a (model, train, test) cell without a current-
+protocol evaluation is reported as missing. Existing eval JSONs that are
+newer than the run's weights, from the current protocol and the same split/
+imgsz are REUSED (no re-inference, e.g. the in-domain cells the eval step
+already produced); --force re-evaluates everything.
 
 Usage:
   python training/cross_eval.py                       # all runs x all datasets
@@ -23,6 +33,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import common  # noqa: E402
+import report_lib  # noqa: E402
 
 
 def discover_runs(runs_dir: str) -> list[str]:
@@ -40,6 +51,36 @@ def run_info(run_dir: str) -> dict:
     return info
 
 
+
+def reusable_eval(rd: str, ds: str, split: str, weights: str,
+                  imgsz: int | None) -> dict | None:
+    """Existing eval JSON that is valid for this exact weights file."""
+    path = os.path.join(rd, f"eval_{ds}_{split}.json")
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path) as f:
+            r = json.load(f)
+        if not common.eval_weights_match(r,weights) or os.path.getmtime(path) < os.path.getmtime(weights):
+            return None            # weights changed after this evaluation
+    except (OSError, ValueError):
+        return None
+    if r.get("comparable", True) is False or not common.protocol_current(r):
+        return None
+    if r.get("split", split) != split:
+        return None
+    if imgsz is not None and r.get("imgsz") not in (None, imgsz):
+        return None
+    try:
+        if not (float(r["map50"]) == float(r["map50"])
+                and float(r["map50_95"]) == float(r["map50_95"])):
+            return None            # NaN
+    except (KeyError, TypeError, ValueError):
+        return None
+    r["json_path"] = path
+    return r
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(description="Cross-dataset evaluation matrix")
     p.add_argument("--runs", nargs="+", help="specific run dirs (default: all "
@@ -53,6 +94,14 @@ def main(argv=None):
     p.add_argument("--batch", type=int, default=16)
     p.add_argument("--device", default=None)
     p.add_argument("--data-root", default=None)
+    p.add_argument("--models", nargs="+", default=None,
+                   help="only runs of these models (manifest model names)")
+    p.add_argument("--results-dir", default=None,
+                   help="where the publication matrix/figures go "
+                        "(default <repo>/results)")
+    p.add_argument("--force", action="store_true",
+                   help="re-evaluate every cell even when a valid eval JSON "
+                        "for the current weights already exists")
     p.add_argument("--stage", action="store_true",
                    help="stage every requested dataset to fast local disk ONCE "
                         "before the matrix runs (never re-staged per cell, W6.2)")
@@ -62,14 +111,21 @@ def main(argv=None):
     runs = a.runs or discover_runs(runs_dir)
     if not runs:
         sys.exit(f"no finished runs (best.pt) found under {runs_dir}")
+    if a.models:
+        runs = [rd for rd in runs if run_info(rd)["model"] in a.models]
+        if not runs:
+            sys.exit(f"no runs of models {a.models} under {runs_dir}")
     data_root = common.resolve_data_root(a.data_root)
+    results_dir = (os.path.abspath(a.results_dir) if a.results_dir
+                   else str(common.REPO_ROOT / "results"))
 
     if a.stage:
         # Stage once for the whole matrix; cells read the staged copy.
         data_root, _yaml = common.stage_local("all", data_root)
 
-    import evaluate
+    evaluate = None          # imported lazily: cached cells need no torch
     rows = []
+    failures = []
     for rd in runs:
         info = run_info(rd)
         try:
@@ -80,13 +136,22 @@ def main(argv=None):
               f"trained_on={info['trained_on']}) #####")
         for ds in a.datasets:
             try:
-                # v4 (W6): one src/metrics protocol for every family
-                # (Ultralytics runs YOLO inference only).
-                r = evaluate.evaluate_run(
-                    rd, ds, split=a.split, data_root=data_root,
-                    imgsz=a.imgsz, batch=a.batch, device=a.device,
-                    model_name=None if info["model"] == "?" else info["model"],
-                    save=True)
+                r = None if a.force else reusable_eval(
+                    rd, ds, a.split, weights, a.imgsz)
+                if r is not None:
+                    print(f"[reuse] {ds}: valid eval for current weights "
+                          f"({os.path.basename(r['json_path'])})")
+                else:
+                    if evaluate is None:
+                        import evaluate  # noqa: E402
+                    # v4 (W6): one src/metrics protocol for every family
+                    # (Ultralytics runs YOLO inference only).
+                    r = evaluate.evaluate_run(
+                        rd, ds, split=a.split, data_root=data_root,
+                        imgsz=a.imgsz, batch=a.batch, device=a.device,
+                        model_name=(None if info["model"] == "?"
+                                    else info["model"]),
+                        save=True)
                 if r.get("comparable", True) is False:
                     # Ultralytics-native fallback metrics are a different,
                     # non-comparable protocol; never mix them into the matrix.
@@ -108,11 +173,16 @@ def main(argv=None):
                                  json_path=r.get("json_path")))
             except FileNotFoundError as e:
                 print(f"[skip] {ds}: {e}")
+                failures.append(dict(run=info["run"], eval_on=ds,
+                                     error=f"missing data/weights: {e}"))
             except Exception as e:
                 print(f"[error] {ds}: {e}")
+                failures.append(dict(run=info["run"], eval_on=ds, error=str(e)))
 
     if not rows:
-        sys.exit("no evaluations completed")
+        sys.exit("no evaluations completed" + (
+            f" ({len(failures)} cell failures, first: {failures[0]})"
+            if failures else ""))
 
     # ---- csv ----
     csv_path = os.path.join(runs_dir, "cross_eval.csv")
@@ -125,7 +195,8 @@ def main(argv=None):
     # ---- markdown matrix ----
     md_path = os.path.join(runs_dir, "cross_eval.md")
     with open(md_path, "w") as f:
-        f.write(f"# Cross-dataset evaluation ({a.split} split, imgsz={a.imgsz})\n\n")
+        f.write(f"# Cross-dataset evaluation ({a.split} split, imgsz="
+                f"{a.imgsz or 'per-run trained'})\n\n")
         head = "| run (model / trained on) | " + \
                " | ".join(f"{d} mAP50 / mAP50-95" for d in a.datasets) + " |"
         f.write(head + "\n|" + "---|" * (len(a.datasets) + 1) + "\n")
@@ -143,7 +214,8 @@ def main(argv=None):
     # ---- json ----
     json_path = os.path.join(runs_dir, "cross_eval.json")
     with open(json_path, "w") as f:
-        json.dump(dict(split=a.split, imgsz=(a.imgsz or "per-run trained"), rows=rows), f, indent=2)
+        json.dump(dict(split=a.split, imgsz=(a.imgsz or "per-run trained"), rows=rows,
+                       failures=failures), f, indent=2)
 
     # ---- heatmap (mAP50, runs x datasets) ----
     heat_path = os.path.join(runs_dir, "cross_eval_heatmap.png")
@@ -183,9 +255,43 @@ def main(argv=None):
         print(f"[warn] heatmap not written: {e}")
         heat_path = None
 
+
+    # ---- C6 publication matrix: <results>/cross_dataset_matrix.csv + figs ----
+    pub = []
+    try:
+        recs, _sk = report_lib.load_eval_records([runs_dir], split=a.split)
+        # restrict to the runs of THIS invocation
+        wanted = {os.path.realpath(rd) for rd in runs}
+        recs = [r for r in recs if os.path.realpath(r["run_dir"]) in wanted]
+        dsets = [d for d in report_lib.DATASETS if d in a.datasets]
+        recs = [r for r in recs if r["eval_on"] in dsets
+                and r["trained_on"] in report_lib.DATASETS]
+        df = report_lib.build_cross_matrix(recs, dsets)
+        os.makedirs(results_dir, exist_ok=True)
+        mat_csv = os.path.join(results_dir, "cross_dataset_matrix.csv")
+        df.to_csv(mat_csv, index=False, float_format="%.5f")
+        sum_md = os.path.join(results_dir, "cross_dataset_summary.md")
+        missing = report_lib.cross_coverage(
+            df, sorted({r["model"] for r in recs}), dsets)
+        with open(sum_md, "w") as f:
+            f.write(report_lib.cross_markdown(df, dsets))
+            if missing:
+                f.write("\n## Missing cells (not evaluated)\n\n"
+                        + "\n".join(f"- {m}" for m in missing) + "\n")
+        pub += [mat_csv, sum_md]
+        pub += report_lib.plot_cross_heatmaps(
+            df, Path(results_dir) / "figures", dsets)
+        if missing:
+            print(f"[cross][warn] {len(missing)} of the 3x3 cells have no "
+                  f"result (listed in {sum_md})")
+    except Exception as e:
+        print(f"[cross][warn] publication matrix/figures not written: {e}")
+
     print(f"\nwrote:\n  {csv_path}\n  {md_path}\n  {json_path}")
     if heat_path:
         print(f"  {heat_path}")
+    for pth in pub:
+        print(f"  {pth}")
     print("\nMatrix (mAP50 / mAP50-95):")
     with open(md_path) as f:
         print(f.read())

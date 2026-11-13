@@ -201,13 +201,13 @@ def train_yolo_obb(
     # pipeline's runs/train/<dataset>_<model> contract holds, §4.4)
     paths = resolve_pipeline_paths()
     if run_dir is not None:
-        save_dir = Path(run_dir)
-        weights_dir = save_dir.parent
+        save_dir = Path(run_dir).resolve()
+        weights_dir = save_dir.parent.resolve()
         save_dir.mkdir(parents=True, exist_ok=True)
     else:
-        weights_dir = Path(project_dir or paths["weights_dir"])
+        weights_dir = Path(project_dir or paths["weights_dir"]).resolve()
         weights_dir.mkdir(parents=True, exist_ok=True)
-        save_dir = weights_dir / f"{model_name}_{dataset_name}"
+        save_dir = (weights_dir / f"{model_name}_{dataset_name}").resolve()
 
     run_name = save_dir.name
     last_pt = save_dir / "weights" / "last.pt"
@@ -226,7 +226,10 @@ def train_yolo_obb(
                   f"continuing with local files", flush=True)
 
     # Check for resumption
+    from src.training.yolo_resume import extension_trainer, checkpoint_progress
     can_resume = False
+    completed_before = 0
+    stripped_extension = False
     if resume and last_pt.exists():
         try:
             # Check if checkpoint retains optimizer/epoch training state.
@@ -235,13 +238,24 @@ def train_yolo_obb(
             # default load fails and resume was silently disabled.
             ckpt_obj = torch.load(str(last_pt), map_location="cpu",
                                   weights_only=False)
-            if isinstance(ckpt_obj, dict) and ("epoch" in ckpt_obj or "optimizer" in ckpt_obj):
+            completed_before = checkpoint_progress(ckpt_obj, save_dir)
+            if completed_before >= epochs:
+                return {"model_name": model_name, "dataset_name": dataset_name, "run_dir": str(save_dir),
+                        "best_weights": str(best_pt if best_pt.exists() else last_pt), "last_weights": str(last_pt),
+                        "epochs_trained": completed_before, "epochs_completed": completed_before}
+            if int(ckpt_obj.get("epoch", -1)) >= 0 and ckpt_obj.get("optimizer") is not None:
                 can_resume = True
                 print(f"[*] Found resumable training checkpoint at: {last_pt}. Resuming training seamlessly...")
                 model = YOLO(str(last_pt))
             else:
-                print(f"[*] Checkpoint at {last_pt} is stripped / completed. Starting run with these weights...")
-                model = YOLO(str(last_pt))
+                print(f"[resume] stripped legacy checkpoint: continue at global epoch {completed_before}; optimizer moments cannot be recovered")
+                # Keep the original untouched. Native stripped files reset epoch=-1;
+                # recover global progress from CSV rather than restarting counters.
+                ckpt_obj["epoch"] = completed_before-1
+                recovered = save_dir / "resume_input.pt"
+                torch.save(ckpt_obj, recovered)
+                model = YOLO(str(recovered))
+                can_resume = completed_before > 0
         except Exception as e:  # W10 audit: never swallow silently
             print(f"[resume][warn] checkpoint probe failed ({e}); loading "
                   f"weights without optimizer state", flush=True)
@@ -278,7 +292,7 @@ def train_yolo_obb(
     start_time = time.time()
     train_args = {
         "data": str(yaml_path),
-        "epochs": epochs,
+        "epochs": epochs-completed_before if stripped_extension else epochs,
         "batch": batch_size,
         "imgsz": imgsz,
         "device": dev,
@@ -308,6 +322,20 @@ def train_yolo_obb(
     if cache and str(cache).lower() in ("ram", "disk", "true", "1"):
         train_args["cache"] = str(cache).lower() if str(cache).lower() in ("ram", "disk") else True
 
+    def _record_last_progress(trainer):
+        import hashlib, json
+        path = Path(trainer.last)
+        if not path.is_file():
+            return
+        digest = hashlib.sha256()
+        with path.open("rb") as stream:
+            for block in iter(lambda: stream.read(1024*1024), b""):
+                digest.update(block)
+        from src.utils.checkpoint import atomic_save_json
+        atomic_save_json({"epoch": int(trainer.epoch)+1, "checkpoint_size": path.stat().st_size,
+                          "sha256": digest.hexdigest()}, path.with_name(path.name+".progress.json"))
+    model.add_callback("on_model_save", _record_last_progress)
+
     # W7.2 (review R4c + B-round): mirror ASYNCHRONOUSLY via DriveMirror,
     # INCLUDING best.pt. Callback order verified on installed Ultralytics
     # 8.4.211 (engine/trainer.py L679-693): save_model() -> on_model_save
@@ -327,6 +355,8 @@ def train_yolo_obb(
             try:
                 _snap_dir.mkdir(parents=True, exist_ok=True)
                 epoch = getattr(_trainer, "epoch", 0) or 0
+                if (epoch+1) % max(1, mirror_every) and epoch+1 < _trainer.epochs:
+                    return
                 for f in (last_pt, best_pt, save_dir / "results.csv", save_dir / "train.log", save_dir / "args.yaml"):
                     if f.exists():
                         # B-round note 2: UNIQUE snapshot name per save -
@@ -335,6 +365,16 @@ def train_yolo_obb(
                         # (torn mirror). The mirrored file keeps the
                         # canonical basename via dest_name; the snapshot is
                         # unlinked after a successful copy.
+                        if f.name == "last.pt":
+                            import json, hashlib
+                            hasher = hashlib.sha256()
+                            with f.open("rb") as stream:
+                                for block in iter(lambda: stream.read(1024*1024), b""):
+                                    hasher.update(block)
+                            digest = hasher.hexdigest()
+                            progress = _snap_dir / f"{f.stem}_e{epoch}.progress.json"
+                            progress.write_text(json.dumps({"epoch": epoch+1, "checkpoint_size": f.stat().st_size, "sha256": digest}))
+                            _drive_mirror.submit(progress, dest_name=f.name+".progress.json", unlink_after=True)
                         snap = _snap_dir / f"{f.stem}_e{epoch}{f.suffix}"
                         shutil.copy2(f, snap)
                         _drive_mirror.submit(snap, dest_name=f.name,
@@ -344,15 +384,16 @@ def train_yolo_obb(
 
         model.add_callback("on_model_save", _mirror_on_save)
 
-    if staged_trainer_cls is not None:
-        train_args["trainer"] = staged_trainer_cls
+    from ultralytics.models.yolo.obb import OBBTrainer
+    train_args["trainer"] = extension_trainer(staged_trainer_cls or OBBTrainer, train_args["epochs"])
 
     results = model.train(**train_args)
     elapsed_minutes = (time.time() - start_time) / 60.0
 
     print(f"\n[✓] Training completed in {elapsed_minutes:.2f} minutes!")
+    mirror_errors = []
     if _drive_mirror is not None:
-        _drive_mirror.flush()  # drain the async mirror before end-of-run work
+        mirror_errors = _drive_mirror.finish()  # drain the async mirror before end-of-run work
 
     # 5. Persist Best and Last Checkpoints
     final_best = save_dir / "weights" / "best.pt"
@@ -400,14 +441,18 @@ def train_yolo_obb(
         print(f"[metrics][warn] could not parse Ultralytics results_dict: {e}")
         best_map50 = None
 
+    completed_actual = int(getattr(model.trainer, "epoch", -1))+1
+    if stripped_extension:
+        completed_actual += completed_before
     return {
         "model_name": model_name,
         "dataset_name": dataset_name,
         "best_weights": str(target_best if target_best.exists() else final_best),
         "last_weights": str(final_last),
         "elapsed_minutes": elapsed_minutes,
-        "epochs_completed": epochs,
-        "epochs_trained": epochs,
+        "mirror_errors": mirror_errors,
+        "epochs_completed": completed_actual,
+        "epochs_trained": completed_actual,
         "best_map50": best_map50,
         "best_val_loss": None,
         "oom_events": 0,

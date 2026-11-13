@@ -103,6 +103,9 @@ def ensure_dataset_yaml(ds: str, data_root: str) -> str:
     if ds not in DATASETS:
         raise ValueError(f"unknown dataset '{ds}' (choose from {DATASETS})")
     if ds == "all":
+        from src.data.schema import validate_names
+        for item in REAL_DATASETS:
+            validate_names(os.path.join(data_root, item), CLASSES)
         missing = [s for s in REAL_DATASETS
                    if not os.path.isdir(os.path.join(data_root, s, "train", "images"))]
         if missing:
@@ -111,6 +114,8 @@ def ensure_dataset_yaml(ds: str, data_root: str) -> str:
                 f"(run data_cleaning/clean_build_v4.py first; root={data_root})")
         return _write_ds_yaml(os.path.join(data_root, "dataset_all.yaml"),
                               data_root, ds)
+    from src.data.schema import validate_names
+    validate_names(os.path.join(data_root, ds), CLASSES)
     for sp in SPLITS:
         d = os.path.join(data_root, ds, sp, "images")
         if not os.path.isdir(d):
@@ -239,16 +244,22 @@ def human_bytes(n: int) -> str:
 
 
 CURRENT_COORD_SPACE_PREFIX = "original image px"
+# v4.2: the matching correction changed metric semantics; results without
+# this exact metric_version were produced by older semantics and must be
+# re-evaluated, never mixed in.
+CURRENT_METRIC_VERSION = "v4.2-greedy-unmatched"
 
 
 def protocol_current(res: dict) -> bool:
-    """True when an eval result JSON came from the CURRENT unified protocol
-    (R3+B1: GT raw in original image coordinates, preds inverse-letterboxed).
-    Older coord_space values (e.g. 'letterbox(imgsz)') mixed different GT
-    sets per family/imgsz and must never be aggregated with current
-    results - cross_eval and summarize_runs skip them with a warning.
+    """True when an eval result JSON came from the CURRENT unified protocol:
+    coord_space "original image px ..." (R3+B1: GT raw in original image
+    coordinates, preds inverse-letterboxed) AND metric_version ==
+    CURRENT_METRIC_VERSION (v4.2 matching semantics). Anything else is an
+    older, incompatible protocol - cross_eval, summarize_runs and the report
+    generator skip it with a warning ("re-run evaluation").
     """
-    return str(res.get("coord_space", "")).startswith(CURRENT_COORD_SPACE_PREFIX)
+    return (str(res.get("coord_space", "")).startswith(CURRENT_COORD_SPACE_PREFIX)
+            and res.get("metric_version") == CURRENT_METRIC_VERSION)
 
 
 def count_instances(ds: str, data_root: str, split: str = "test") -> dict[str, int]:
@@ -268,3 +279,18 @@ def count_instances(ds: str, data_root: str, split: str = "test") -> dict[str, i
                     if t and t[0].isdigit() and int(t[0]) < len(CLASSES):
                         out[CLASSES[int(t[0])]] += 1
     return out
+
+
+def weights_fingerprint(path):
+    import hashlib
+    hasher=hashlib.sha256()
+    with open(path,"rb") as stream:
+        for block in iter(lambda:stream.read(1024*1024),b""):
+            hasher.update(block)
+    return {"sha256":hasher.hexdigest(),"size":os.path.getsize(path)}
+
+
+def eval_weights_match(result,weights):
+    try:
+        return result.get("weights_fingerprint")==weights_fingerprint(weights)
+    except OSError:return False

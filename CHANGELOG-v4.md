@@ -1,3 +1,113 @@
+# v4.2 convergence/optimization revision - 2026-11-13
+
+The new attached source ZIP is the base. No data/checkpoint class IDs were
+changed. See docs/CLASS_SCHEMA_CONFLICT.md for the unresolved master-spec
+conflict. This section records code changes, not measured L4 acceptance.
+
+## C1-C8
+
+- C1: exact device tensor rectangle intersection, FP64 internal clipping,
+  relative tolerances, degeneracy tests, chunking and AABB prefilter:
+  src/metrics/tensor_obb.py:25,75. Device suppression has no per-box host
+  bool read but still O(N) tiny kernel launches: :90. CUDA timing unrun.
+  Vectorized Shapely CPU path: src/metrics/geometry.py:184.
+- C1: tensor-resident decode through NMS in src/training/decode.py:38,94.
+  Public NumPy metric contracts remain unchanged.
+- C2: sigmoid focal, class/L1/KL matching costs 2/5/2, Smooth L1 periodic
+  angle loss, stabilized symmetric Gaussian KL: src/training/detr_loss.py:17,40,48,84.
+  Legacy K+1 head row kept unused for checkpoint shape compatibility.
+  Three-consecutive main/aux numerical-degradation bound: :95.
+  Intermediate decoder outputs in all five model source files; auxiliary
+  losses average then add to final loss, :141.
+- C3: closed-form completed-epoch cosine scheduler with preserved optimizer
+  moments and explicit warm-restart option: src/training/schedule.py:5.
+  Resume remaps to new horizon instead of loading stale T_max. LR can rise
+  from an old floor, as required by the supplied formula; no no-jump claim.
+- C4: extend native Ultralytics horizon before resume setup, preserve full
+  last.pt around final optimizer strip, restore global epoch from a legacy
+  stripped run with explicit missing-moments warning and fresh warmup:
+  src/training/yolo_resume.py:9,54; src/training/train_yolo.py:229.
+- C5: existing 60/80/150 targets retained; queue completion uses actual
+  completed epochs, not requested epochs. Full real-data convergence unrun.
+  RAM cache budget is divided across workers: src/data/dataset.py:88,120.
+- C6: cached current-protocol transfer evaluation, delta mAP matrix, missing
+  cell coverage and heatmaps: training/cross_eval.py:55,85;
+  training/report_lib.py:189,294. Real 3x3 transfers unrun.
+- C7: atomic immutable mirror snapshots for all engines, bounded retry,
+  local-result preservation on backup errors, SHA-bound progress sidecars:
+  src/training/engine_common.py:180,245,321. Direct queue/metadata recovery:
+  training/run.py:123,413,679. Replays saved target/settings in quickstart.
+  Verified-epoch selection, conservative unknown checkpoint handling,
+  unique backups and selected-local progress report:
+  training/colab_recovery.py:82,99,106,125. Real Colab preemption unrun.
+- C8: evidence-only LaTeX/PDF/SVG/PNG figures and coverage reports:
+  scripts/generate_report.py:181; training/report_lib.py:373,475,510,548,595.
+  Mixed hardware/device/timing-basis speed values are rejected: :175.
+  Qualitative display shows only top20 with shown/total counts; metrics do
+  not change. Missing results remain missing; mock output is not research evidence.
+
+## Mandatory self-discovery audit
+
+1. Recovered src/data/ modules missing from the supplied ZIP from the prior
+   reviewed package; no existing newer file overwritten. Moved synthetic
+   generator to tests/mock_data.py, removed src/data exports.
+2. Fixed RiO-DETR image-independent prediction path by consuming backbone
+   memory before refinement: src/models/rio_detr.py:100. Existing weights
+   need reconvergence, no accuracy claim.
+3. Removed label-conditioned fake inference. Legacy ground_truth_hints
+   now raises instead of synthesizing predictions: src/models/base.py:117.
+4. Corrected AP greedy assignment to select the best UNMATCHED GT, rather
+   than treating a second valid match as FP: src/metrics/detection_map.py:97.
+   Old results are excluded by metric_version guard: training/common.py:252.
+5. Fixed disk cache .npy suffix/atomic file race, worker-specific temp names,
+   and unbounded aggregate worker RAM allowance: src/data/dataset.py:88,120,642.
+6. Removed one-pixel GT side inflation in raw polygon conversion so tiny
+   original annotations remain their actual size: src/data/dataset.py:45;
+   src/metrics/geometry.py:57. Training-time min-size filtering remains explicit.
+7. Training-validation now uses original coordinates/raw GT, sharing final
+   metric semantics: src/training/metric_protocol.py:6 and both validate engines.
+8. Custom checkpoint resume errors now fail instead of silently continuing
+   with partially restored state. Actual early-stop epochs are returned by
+   both custom engines, preventing done-state overstatement.
+9. Supplied test runner only called its first 15 of 26 defined tests.
+   It now executes all 26, generates its own YOLO checkpoint instead of
+   skipping, then runs all v4.2 regressions: tests/test_v4_units.py final block.
+10. Fixed report step's missing runs-dir, empty qualitative dataset handling,
+    torch checkpoint loading, stable data-root selection, and hardware provenance.
+11. Queue remembers invocation horizons/test flags for recovery. Manifest
+    progress cannot skip an older selected checkpoint; requires verified epoch.
+    Eval/suite failures return nonzero instead of a false successful pipeline.
+12. YAML schema conflicts fail clearly; read-only hash-based split-leakage
+    audit added: src/data/schema.py:7,21; scripts/audit_dataset.py.
+    No real split integrity claim without running it on actual data.
+
+## Final recovery/report invariants
+
+- Every eval writer records a size/SHA256 weight fingerprint:
+  training/evaluate.py. Cross cache reuse and report loading require it:
+  training/common.py::eval_weights_match, training/cross_eval.py::reusable_eval,
+  training/report_lib.py::load_eval_records. Legacy JSONs need rerun.
+- No-op recovery preserves healthy local evals, tested twice. Restored evals
+  and checkpoint replacements trigger atomic invalidation with backups.
+  Legacy manifest epoch history survives unknown checkpoint authority.
+- Per-file mirrors are not transactional bundles. Even an epoch/hash-bound
+  best can be outdated relative to last. All engines therefore restore last
+  conservatively, back up/remove stale best when last changes, and let
+  find_weights fall back to last. No recovered-best optimality claim.
+- Generator partitions speed figures by device/hardware/timing basis and
+  omits speed in combined mixed-provenance tables. Timed-code inspection
+  confirms YOLO predict/NMS and custom forward/decode windows differ;
+  their distinct labels are retained, not renamed to appear comparable.
+
+## Verification scope
+
+See FINAL_REPORT_V4.md for actual commands/outcomes. CUDA/L4 targets,
+epoch25 DETR probability, real convergence and real 3x3 transfers remain
+unrun. All23 CPU smoke reached 22 trained/evaluated; yolov8l-obb was killed
+before checkpoint save twice, so no all23 pass is claimed.
+
+---
+
 # Changelog v4
 
 ## Added

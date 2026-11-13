@@ -112,7 +112,7 @@ class CustomOBBDetector(BaseOBBDetector):
         self.net.eval()
 
         if weights_path and Path(weights_path).exists():
-            checkpoint = torch.load(weights_path, map_location=self.device)
+            checkpoint = torch.load(weights_path, map_location=self.device, weights_only=False)
             if isinstance(checkpoint, dict) and "model_state" in checkpoint:
                 self.net.load_state_dict(checkpoint["model_state"])
             elif isinstance(checkpoint, dict):

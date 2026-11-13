@@ -5,7 +5,7 @@ Computes mAP@0.50, mAP@0.75, mAP@0.50:0.95, and scale-specific AP (AP_s, AP_m, A
 
 from __future__ import annotations
 
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
 import numpy as np
 from src.metrics.geometry import compute_obb_iou_matrix
 
@@ -69,13 +69,11 @@ def evaluate_class_multi_iou(
         gt_boxes = filtered_gt_per_img[img_idx]
         if len(gt_boxes) == 0:
             for s in valid_scores:
-                all_preds.append((float(s), img_idx, -1, 0.0))
+                all_preds.append((float(s), img_idx, np.zeros(0)))
         else:
             iou_mat = compute_obb_iou_matrix(gt_boxes, valid_boxes)
             for j in range(len(valid_boxes)):
-                best_gt_idx = int(np.argmax(iou_mat[:, j]))
-                best_iou = float(iou_mat[best_gt_idx, j])
-                all_preds.append((float(valid_scores[j]), img_idx, best_gt_idx, best_iou))
+                all_preds.append((float(valid_scores[j]), img_idx, iou_mat[:, j]))
 
     results: Dict[float, Dict[str, Any]] = {}
     if n_gt == 0:
@@ -92,10 +90,14 @@ def evaluate_class_multi_iou(
         tp = np.zeros(len(all_preds))
         fp = np.zeros(len(all_preds))
 
-        for p_idx, (score, img_idx, best_gt_idx, best_iou) in enumerate(all_preds):
-            if best_gt_idx >= 0 and best_iou >= th and not gt_matched_per_img[img_idx][best_gt_idx]:
+        for p_idx, (score, img_idx, overlaps) in enumerate(all_preds):
+            # Score-ordered greedy matching must try the best UNMATCHED GT.
+            # The old fixed argmax counted a second legitimate detection as FP.
+            available = np.where(~gt_matched_per_img[img_idx], overlaps, -1.0)
+            best = int(available.argmax()) if len(available) else -1
+            if best >= 0 and available[best] >= th:
                 tp[p_idx] = 1.0
-                gt_matched_per_img[img_idx][best_gt_idx] = True
+                gt_matched_per_img[img_idx][best] = True
             else:
                 fp[p_idx] = 1.0
 

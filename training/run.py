@@ -55,7 +55,7 @@ from training import common  # noqa: E402
 from training.staging import StageHandle, check_disk_guard, start_background_stage  # noqa: E402
 from src.training.train_dense import GracefulStop  # noqa: E402
 
-PIPELINE_VERSION = "4.0.0"
+PIPELINE_VERSION = "4.2.0"
 STATE_FILENAME = "pipeline_state.json"
 STEPS = ["stage", "train", "eval", "cross", "summary", "export", "report"]
 MODE_PRESETS = {
@@ -124,8 +124,11 @@ class PipelineState:
     """Persistent job-queue state so a killed pipeline replays only what is
     left (`--auto-resume`, default on)."""
 
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, mirror_dir=None):
         self.path = path
+        from src.training.engine_common import DriveMirror
+        self.mirror_dir = mirror_dir
+        self.mirror = DriveMirror(mirror_dir, run_subdir="_suite")
         self.data: Dict[str, Any] = {
             "version": PIPELINE_VERSION,
             "created": datetime.now(timezone.utc).isoformat(),
@@ -152,6 +155,7 @@ class PipelineState:
         tmp = self.path.with_suffix(".tmp")
         tmp.write_text(json.dumps(self.data, indent=2))
         os.replace(tmp, self.path)
+        self.mirror.submit(self.path)
 
     def ensure_jobs(self, datasets: List[str], models: List[str]) -> None:
         known = {j["id"] for j in self.data["jobs"]}
@@ -223,7 +227,7 @@ def ensure_mock_data(data_root: str) -> None:
     if (mock_dir / "images" / "train").is_dir():
         return
     print("[pipeline] generating mock dataset (no GPU / no data path, W8.6)")
-    from src.data.mock_data import create_mock_dataset
+    from tests.mock_data import create_mock_dataset
     create_mock_dataset("mock", Path(data_root), num_train=6, num_val=4,
                         img_size=(320, 320))
 
@@ -312,6 +316,7 @@ def run_train_job(dataset: str, model: str, args: argparse.Namespace,
         "resolved_tuning": tuned,
         "status": "running",
         "test_mode": bool(args.test),
+        "data_root": str(args.data_dir),
         "updated": datetime.now(timezone.utc).isoformat(),
     })
     manifest.setdefault("created", datetime.now(timezone.utc).isoformat())
@@ -332,6 +337,7 @@ def run_train_job(dataset: str, model: str, args: argparse.Namespace,
             device=args.device,
             workers=args.workers,
             resume=args.auto_resume,
+            warm_restart=args.warm_restart,
             # W2 fix (review A1): while staging is active the dataset is
             # built from the SOURCE root (complete, stable inventory) and
             # reads are redirected to staged copies as they land. Without a
@@ -362,9 +368,11 @@ def run_train_job(dataset: str, model: str, args: argparse.Namespace,
             "epochs_trained": result.get("epochs_trained"),
             "oom_events": result.get("oom_events"),
             "wall_time_s": result["wall_time_s"],
+            "mirror_errors": result.get("mirror_errors", []),
         }
         manifest["updated"] = datetime.now(timezone.utc).isoformat()
         manifest_path.write_text(json.dumps(manifest, indent=2))
+        mirror_run_metadata(run_dir, args.mirror_dir)
         return result
     except GracefulStop:
         # Signal during training: checkpoint + manifest already written by the
@@ -400,6 +408,17 @@ def run_train_job(dataset: str, model: str, args: argparse.Namespace,
             pass
         return {"model_name": model, "dataset_name": dataset, "status": "failed",
                 "error": str(e)}
+
+
+def mirror_run_metadata(run_dir, mirror_dir):
+    if not mirror_dir:
+        return
+    from src.training.engine_common import DriveMirror
+    mirror = DriveMirror(mirror_dir, run_subdir=Path(run_dir).name)
+    for file in Path(run_dir).iterdir():
+        if file.is_file() and (file.name == "run_manifest.json" or file.name.startswith("eval_")):
+            mirror.submit(file)
+    mirror.finish()
 
 
 def eval_data_root(datasets: List[str], args: argparse.Namespace,
@@ -462,9 +481,11 @@ def run_eval_step(datasets: List[str], models: List[str],
                     batch=args.batch or 8,
                     device=args.device, data_root=eval_root,
                     test_mode=args.test)
+                state.set_job(ds, m, eval_status="done", error=None)
+                mirror_run_metadata(run_dir, args.mirror_dir)
             except Exception as e:
                 print(f"[eval][FAIL] {ds}/{m}: {e}", flush=True)
-                state.set_job(ds, m, error=f"eval: {e}")
+                state.set_job(ds, m, error=f"eval: {e}", eval_status="failed")
 
 
 def run_suite_step(step: str, datasets: List[str], models: List[str],
@@ -474,7 +495,12 @@ def run_suite_step(step: str, datasets: List[str], models: List[str],
     try:
         if step == "cross":
             from training import cross_eval
-            argv = ["--runs-dir", args.runs_dir]
+            argv = ["--runs-dir", args.runs_dir, "--models", *models]
+            real_datasets = [d for d in datasets if d in common.REAL_DATASETS]
+            if real_datasets:
+                argv += ["--datasets", *real_datasets]
+            if args.device:
+                argv += ["--device", args.device]
             cross_root = eval_data_root(datasets, args,
                                         handles or {})
             if cross_root or args.data_dir:
@@ -491,8 +517,13 @@ def run_suite_step(step: str, datasets: List[str], models: List[str],
             subprocess.run([sys.executable, "scripts/export_results.py"],
                            cwd=str(REPO_ROOT), check=True)
         elif step == "report":
-            subprocess.run([sys.executable, "scripts/generate_report.py"],
-                           cwd=str(REPO_ROOT), check=True)
+            cmd = [sys.executable, "scripts/generate_report.py", "--runs-dir", args.runs_dir]
+            if args.data_dir:
+                cmd += ["--data-root", args.data_dir]
+            if args.test:
+                cmd += ["--datasets", "mock", "--split", "val", "--device", "cpu",
+                        "--results-dir", str(Path(args.runs_dir)/"test_report")]
+            subprocess.run(cmd, cwd=str(REPO_ROOT), check=True)
         state.set_suite_step(step, "done")
         if step == "summary" and args.mirror_dir:
             # W6.4 (review D): the master summary rides the Drive mirror too.
@@ -532,6 +563,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                         "(use --datasets mock for the no-GPU/no-data path)")
 
     # override knobs (§2.6: explicit flags beat MODEL_TUNING)
+    p.add_argument("--warm-restart", action="store_true", help="restart the custom-engine cosine from base LR at the resumed epoch; moments retained")
     p.add_argument("--epochs", type=int, default=None)
     p.add_argument("--batch", type=int, default=None,
                    help="EFFECTIVE batch size (accumulation splits it into "
@@ -624,6 +656,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                          f"(choose from {common.DATASETS + ['mock']})")
     if "all" in datasets:
         datasets = ["codrone", "visdrone", "dota"]
+    # Resolve once: helper-created empty directories must not change the
+    # data root half-way through train/eval/report.
+    if args.data_dir is None:
+        args.data_dir = str(REPO_ROOT/"data") if args.test else common.resolve_data_root(None)
     if "mock" in datasets:
         args.data_dir = args.data_dir or str(REPO_ROOT / "data")
         ensure_mock_data(common.resolve_data_root(args.data_dir))
@@ -643,13 +679,19 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(f"[pipeline] runs dir: {args.runs_dir} | "
           f"auto-resume: {args.auto_resume} | mirror: {args.mirror_dir}")
 
-    state = PipelineState(Path(args.runs_dir) / STATE_FILENAME)
+    if args.auto_resume and args.mirror_dir:
+        from training.colab_recovery import recover
+        recover(args.mirror_dir,args.runs_dir)
+    state = PipelineState(Path(args.runs_dir) / STATE_FILENAME, args.mirror_dir)
     if args.auto_resume:
         if state.load():
             print(f"[pipeline] resuming job queue from {state.path}")
     state.data["models"] = models
     state.data["datasets"] = datasets
     state.data["steps"] = steps
+    state.data["invocation"] = {k: getattr(args,k,None) for k in (
+        "epochs", "batch", "micro_batch", "img_size", "lr", "weight_decay",
+        "patience", "test", "cache", "workers", "data_dir", "warm_restart") }
     state.ensure_jobs(datasets, models)
     state.save()
 
@@ -675,6 +717,12 @@ def main(argv: Optional[List[str]] = None) -> int:
                                 already_trained = int(m_data.get("final_metrics", {}).get("epochs_trained", 0))
                             except Exception:
                                 pass
+                        from training.colab_recovery import checkpoint_epoch
+                        checkpoint = Path(run_dir)/"weights/last.pt"
+                        verified = checkpoint_epoch(checkpoint)
+                        # A manifest can survive one mirror cycle ahead of last.pt.
+                        # Only the selected checkpoint proves recoverable epochs.
+                        already_trained = min(already_trained, verified) if verified is not None else 0
                         tuned = apply_tuned_defaults(m, epochs=args.epochs, lr=args.lr,
                                                      weight_decay=args.weight_decay,
                                                      batch_size=args.batch, img_size=args.img_size,
@@ -706,6 +754,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 0
 
     finally:
+        state.mirror.finish()
         for h in handles.values():
             try:
                 h.wait(timeout=5)
@@ -721,7 +770,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     if failed:
         print(f"\n[!] {len(failed)} job(s) failed — tracebacks in "
               f"{state.path} and each run's run_manifest.json")
-    return 0
+    suite_failed = any(v.get("status") == "failed" for v in state.data["suite_steps"].values())
+    eval_failed = any(j.get("eval_status") == "failed" for j in state.data["jobs"])
+    return 1 if failed or suite_failed or eval_failed else 0
 
 
 if __name__ == "__main__":

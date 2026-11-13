@@ -131,7 +131,7 @@ class RVSADetector(BaseOBBDetector):
         self.net.eval()
 
         if weights_path and Path(weights_path).exists():
-            checkpoint = torch.load(weights_path, map_location=self.device)
+            checkpoint = torch.load(weights_path, map_location=self.device, weights_only=False)
             state = checkpoint.get("model_state", checkpoint) if isinstance(checkpoint, dict) else checkpoint
             self.net.load_state_dict(state, strict=False)
 

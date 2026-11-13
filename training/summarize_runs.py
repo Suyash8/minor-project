@@ -37,16 +37,28 @@ def read_results_csv(run_dir: str) -> dict | None:
             break
     if key is None:
         return None
-    best = max(rows, key=lambda r: float(r.get(key) or 0))
-    return {k.strip(): v for k, v in best.items()}
+    def _f(r):
+        try:
+            v = float(r.get(key) or 0)
+            return v if v == v else 0.0     # NaN rows never win
+        except (TypeError, ValueError):
+            return 0.0
+    best = max(rows, key=_f)
+    out = {k.strip(): v for k, v in best.items()}
+    out["_rows"] = len(rows)
+    return out
 
 
 def summarize_run(run_dir: str) -> dict | None:
     man_p = os.path.join(run_dir, "run_manifest.json")
     man = {}
     if os.path.isfile(man_p):
-        with open(man_p) as f:
-            man = json.load(f)
+        try:
+            with open(man_p) as f:
+                man = json.load(f)
+        except (OSError, ValueError) as ex:
+            print(f"[warn] {os.path.basename(run_dir)}: unreadable "
+                  f"run_manifest.json ({ex}); using weights/results only")
     try:
         common.find_weights(run_dir)
     except FileNotFoundError:
@@ -61,11 +73,21 @@ def summarize_run(run_dir: str) -> dict | None:
         git_commit=man.get("git_commit", "?"),
         epochs=tk.get("epochs", "?"),
         imgsz=tk.get("img_size", tk.get("imgsz", "?")),
+        epochs_done="", status="",
         best_epoch="", map50_val="", map5095_val="",
         map50_test="", map5095_test="", params_m="",
         latency_ms="", imgs_per_sec="", run_dir=run_dir,
     )
     best = read_results_csv(run_dir)
+    done = (man.get("final_metrics") or {}).get("epochs_trained")
+    if done in (None, "") and best:
+        done = best.get("_rows")
+    row["epochs_done"] = done if done not in (None, "") else ""
+    try:
+        row["status"] = ("complete" if int(done) >= int(row["epochs"])
+                         else f"partial ({int(done)}/{int(row['epochs'])})")
+    except (TypeError, ValueError):
+        row["status"] = "unknown"
     if best:
         row["best_epoch"] = best.get("epoch", "")
         row["map50_val"] = round(float(best.get("metrics/mAP50(B)", 0) or 0), 4)
@@ -73,8 +95,13 @@ def summarize_run(run_dir: str) -> dict | None:
     for split in ("test", "val"):
         ev = os.path.join(run_dir, f"eval_{row['dataset']}_{split}.json")
         if os.path.isfile(ev):
-            with open(ev) as f:
-                e = json.load(f)
+            try:
+                with open(ev) as f:
+                    e = json.load(f)
+            except (OSError, ValueError) as ex:
+                print(f"[skip] {os.path.basename(run_dir)}: "
+                      f"{os.path.basename(ev)} unreadable ({ex})")
+                continue
             if e.get("comparable", True) is False:
                 # Ultralytics-native fallback metrics are a different,
                 # non-comparable protocol; never mix them into the summary.
@@ -89,6 +116,13 @@ def summarize_run(run_dir: str) -> dict | None:
                       f"{os.path.basename(ev)} has coord_space "
                       f"'{e.get('coord_space')}' from an older, incompatible "
                       f"eval protocol - re-run evaluation")
+                continue
+            if not (isinstance(e.get("map50"), (int, float))
+                    and isinstance(e.get("map50_95"), (int, float))
+                    and e["map50"] == e["map50"]
+                    and e["map50_95"] == e["map50_95"]):
+                print(f"[skip] {os.path.basename(run_dir)}: "
+                      f"{os.path.basename(ev)} has non-finite mAP")
                 continue
             row["map50_test"] = e.get("map50", "")
             row["map5095_test"] = e.get("map50_95", "")
@@ -117,7 +151,8 @@ def main(argv=None):
         sys.exit(f"no runs found under {runs_dir}")
 
     csv_path = os.path.join(runs_dir, "summary.csv")
-    cols = ["run", "model", "dataset", "epochs", "imgsz", "best_epoch",
+    cols = ["run", "model", "dataset", "epochs", "epochs_done", "status",
+            "imgsz", "best_epoch",
             "map50_val", "map5095_val", "map50_test", "map5095_test",
             "params_m", "latency_ms", "imgs_per_sec", "git_commit", "run_dir"]
     with open(csv_path, "w", newline="") as f:

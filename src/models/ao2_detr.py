@@ -93,6 +93,8 @@ class AO2DETRNet(nn.Module):
         ])
 
         self.cls_head = nn.Linear(embed_dim, num_classes + 1)
+        nn.init.constant_(self.cls_head.bias, math.log(.01/.99))
+        # Legacy background row retained only for old checkpoint compatibility.
         self.reg_head = nn.Linear(embed_dim, 5) # (dx, dy, dw, dh, dang)
 
     def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
@@ -102,13 +104,16 @@ class AO2DETRNet(nn.Module):
 
         queries = self.query_embed.weight.unsqueeze(0).repeat(B, 1, 1)
 
+        aux_outputs = []
         for layer in self.aopr_layers:
             queries = layer(queries, memory)
+            aux_outputs.append({"cls_logits": self.cls_head(queries), "box_deltas": self.reg_head(queries)})
 
         cls_logits = self.cls_head(queries)
         box_deltas = self.reg_head(queries)
 
         return {
+            "aux_outputs": aux_outputs[:-1],
             "cls_logits": cls_logits,
             "box_deltas": box_deltas,
         }
@@ -131,7 +136,7 @@ class AO2DETRDetector(BaseOBBDetector):
         self.net.eval()
 
         if weights_path and Path(weights_path).exists():
-            checkpoint = torch.load(weights_path, map_location=self.device)
+            checkpoint = torch.load(weights_path, map_location=self.device, weights_only=False)
             state = checkpoint.get("model_state", checkpoint) if isinstance(checkpoint, dict) else checkpoint
             self.net.load_state_dict(state, strict=False)
 
@@ -161,7 +166,7 @@ class AO2DETRDetector(BaseOBBDetector):
 
         with torch.no_grad():
             outputs = self.net(batch_tensor)
-            cls_probs = F.softmax(outputs["cls_logits"], dim=-1)[..., :num_classes]
+            cls_probs = outputs["cls_logits"][..., :num_classes].sigmoid()
             box_deltas = outputs["box_deltas"]
 
             for b_idx in range(len(images)):

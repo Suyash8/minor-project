@@ -85,7 +85,7 @@ def evaluate_weights(weights: str, dataset: str, split: str = "test",
 
     n_params = sum(p.numel() for p in model.model.parameters())
     res = dict(
-        weights=os.path.abspath(weights),
+        weights=os.path.abspath(weights), weights_fingerprint=common.weights_fingerprint(weights),
         dataset=dataset, split=split, imgsz=imgsz,
         overall={k: round(float(v), 5) for k, v in m.results_dict.items()
                  if isinstance(v, (int, float))},
@@ -166,7 +166,10 @@ def evaluate_yolo_unified(
     if device in (None, "auto"):
         device = "0" if torch.cuda.is_available() else "cpu"
 
+    dev = torch.device("cuda:0" if str(device) in ("0", "cuda") else str(device))
     raw = AerialOBBDataset(dataset_name=dataset, data_dir=data_root, split=split)
+    if len(raw) == 0:
+        raise FileNotFoundError(f"No {dataset}/{split} images under {data_root}")
     class_names = list(raw.class_names)
     num_classes = len(class_names)
     model = YOLO(weights)
@@ -276,13 +279,14 @@ def evaluate_yolo_unified(
         timing_basis = "wall-clock (single batch; no warmup window)"
     res: Dict[str, Any] = dict(
         comparable=True,
-        weights=os.path.abspath(weights),
+        weights=os.path.abspath(weights), weights_fingerprint=common.weights_fingerprint(weights),
         model=(model_name or os.path.basename(
             os.path.dirname(os.path.abspath(weights)))),
-        family="yolo", protocol="src/metrics (unified)",
+        family="yolo", protocol="src/metrics (unified)", metric_version="v4.2-greedy-unmatched",
         dataset=dataset, split=split, imgsz=imgsz,
         coord_space="original image px (preds inverse-letterbox, GT raw, R3+B1)",
         timing_basis=timing_basis,
+        device=str(dev), hardware=(torch.cuda.get_device_name(dev) if dev.type == "cuda" else "CPU"),
         max_det=1000,
         map50=round(float(metrics["map50"]), 5),
         map50_95=round(float(metrics["map50_95"]), 5),
@@ -473,6 +477,8 @@ def evaluate_generic(
         dev = torch.device(device)
 
     raw = AerialOBBDataset(dataset_name=dataset, data_dir=data_root, split=split)
+    if len(raw) == 0:
+        raise FileNotFoundError(f"No {dataset}/{split} images under {data_root}")
     class_names = list(raw.class_names)
     num_classes = len(class_names)
     ds = UnifiedOBBDataset(raw, img_size=imgsz, augment=False,
@@ -573,12 +579,13 @@ def evaluate_generic(
         imgs_per_s = n_images / max(wall_s, 1e-6)
         timing_basis = "wall-clock (single batch; no warmup window)"
     res: Dict[str, Any] = dict(
-        weights=os.path.abspath(weights),
+        weights=os.path.abspath(weights), weights_fingerprint=common.weights_fingerprint(weights),
         model=model_name, family=family,
-        protocol="src/metrics (unified)", comparable=True,
+        protocol="src/metrics (unified)", comparable=True, metric_version="v4.2-greedy-unmatched",
         dataset=dataset, split=split, imgsz=imgsz,
         coord_space="original image px (preds inverse-letterbox, GT raw, R3+B1)",
         timing_basis=timing_basis,
+        device=str(dev), hardware=(torch.cuda.get_device_name(dev) if dev.type == "cuda" else "CPU"),
         max_det=1000,
         map50=round(float(metrics["map50"]), 5),
         map50_95=round(float(metrics["map50_95"]), 5),

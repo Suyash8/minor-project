@@ -61,11 +61,11 @@ def polygon_to_obb_params(pts: np.ndarray) -> Tuple[float, float, float, float, 
     # Long edge determines primary orientation
     if len0 >= len1:
         w = len0
-        h = max(len1, 1.0)
+        h = max(len1, 0.0)
         angle_rad = math.atan2(v0[1], v0[0])
     else:
         w = len1
-        h = max(len0, 1.0)
+        h = max(len0, 0.0)
         angle_rad = math.atan2(v1[1], v1[0])
 
     angle_deg = math.degrees(angle_rad) % 180.0
@@ -86,7 +86,7 @@ class AerialOBBDataset:
         use_cache: bool = True,
         ram_cache: bool = False,
         disk_cache_dir: Optional[str] = None,
-        workers: int = 1,
+        workers: int = 0,
     ):
         self.dataset_name = dataset_name.lower()
         self.data_dir = Path(data_dir) / self.dataset_name
@@ -112,11 +112,12 @@ class AerialOBBDataset:
         self._ann_cache: Optional[List[Optional[Dict[str, Any]]]] = None
         # W3.7 `--cache ram`: decoded images cached in RAM, bounded by a
         # fraction of currently-free memory (psutil when available, sysconf
-        # otherwise) divided by DataLoader workers so multiprocessing never OOMs.
+        # otherwise) so a big dataset degrades to plain streaming instead of
+        # OOMing the box.
         self.ram_cache = ram_cache
         self._img_cache: Dict[int, np.ndarray] = {}
         self._img_cache_bytes = 0
-        self._img_cache_budget = self._ram_budget_bytes(workers) if ram_cache else 0
+        self._img_cache_budget = self._ram_budget_bytes() // max(1, workers) if ram_cache else 0
         # W3.7 `--cache disk` (review: must be a REAL tier, not an alias of
         # `annotations`): decoded image arrays persist as .npy on fast local
         # disk (the staging root), so later epochs/models skip both the
@@ -192,7 +193,7 @@ class AerialOBBDataset:
 
         if cache_path:
             try:
-                tmp = cache_path.with_suffix(cache_path.suffix + ".tmp")
+                tmp = cache_path.with_suffix(cache_path.suffix + f".{os.getpid()}.tmp")
                 with open(tmp, "wb") as f:
                     pickle.dump({"fingerprint": fp, "entries": entries}, f,
                                 protocol=pickle.HIGHEST_PROTOCOL)
@@ -363,6 +364,8 @@ class AerialOBBDataset:
             # engines train on exactly the same labels as the Ultralytics suite.
             cleaned_names = CLEANED_DATASET_CLASSES.get(self.dataset_name)
             if cleaned_names:
+                from src.data.schema import validate_names
+                validate_names(self.data_dir, cleaned_names)
                 self.class_names = list(cleaned_names)
                 self.class_to_idx = {name: i for i, name in enumerate(self.class_names)}
 
@@ -584,24 +587,21 @@ class AerialOBBDataset:
         return gt_by_class
 
     @staticmethod
-    def _available_system_ram_bytes() -> int:
+    def _ram_budget_bytes() -> int:
+        """RAM-cache budget: 25% of currently available memory."""
         try:
             import psutil
-            return int(psutil.virtual_memory().available)
-        except Exception:
+            return int(psutil.virtual_memory().available * 0.25)
+        except ImportError:
             try:
-                return int(os.sysconf("SC_AVPHYS_PAGES") * os.sysconf("SC_PAGE_SIZE"))
-            except Exception:
+                return int(os.sysconf("SC_AVPHYS_PAGES")
+                           * os.sysconf("SC_PAGE_SIZE") * 0.25)
+            except (ValueError, OSError, AttributeError):
+                print("[dataset] ram_cache requested but free memory is "
+                      "undeterminable (no psutil/sysconf) - RAM image cache "
+                      "disabled, annotations cache still active",
+                      file=sys.stderr)
                 return 0
-
-    @classmethod
-    def _ram_budget_bytes(cls, workers: int = 1) -> int:
-        """RAM-cache budget: bounded safe fraction (<=20% total) divided across workers."""
-        avail = cls._available_system_ram_bytes()
-        if avail <= 0:
-            return 0
-        w = max(1, workers)
-        return int((avail * 0.20) / w)
 
     def get_image_array(self, idx: int) -> np.ndarray:
         """Load sample idx as an (H, W, 3) uint8 RGB array.
@@ -636,17 +636,15 @@ class AerialOBBDataset:
         if self.ram_cache and self._img_cache_budget > 0:
             nbytes = int(arr.nbytes)
             if self._img_cache_bytes + nbytes <= self._img_cache_budget:
-                # Dynamic system memory safety check: never allow free memory to drop below 4 GiB
-                if self._available_system_ram_bytes() > 4 * (1024 ** 3):
-                    self._img_cache[idx] = arr
-                    self._img_cache_bytes += nbytes
+                self._img_cache[idx] = arr
+                self._img_cache_bytes += nbytes
         if disk_path is not None:
             try:
-                self.disk_cache_dir.mkdir(parents=True, exist_ok=True)
                 free = shutil.disk_usage(str(self.disk_cache_dir)).free
                 if free > 2 * 1024 ** 3:
-                    tmp = disk_path.with_name(f"{disk_path.stem}.{os.getpid()}.part.npy")
-                    np.save(tmp, arr)
+                    tmp = disk_path.with_name(disk_path.name + f".{os.getpid()}.part")
+                    with open(tmp, "wb") as f:
+                        np.save(f, arr, allow_pickle=False)
                     os.replace(tmp, disk_path)
             except OSError as e:
                 print(f"[dataset][warn] disk cache write failed "

@@ -72,11 +72,11 @@ def polygon_to_obb_params(pts: np.ndarray) -> Tuple[float, float, float, float, 
 
     if len0 >= len1:
         w = len0
-        h = max(len1, 1.0)
+        h = max(len1, 0.0)
         angle_rad = math.atan2(v0[1], v0[0])
     else:
         w = len1
-        h = max(len0, 1.0)
+        h = max(len0, 0.0)
         angle_rad = math.atan2(v1[1], v1[0])
 
     angle_deg = math.degrees(angle_rad) % 180.0
@@ -149,7 +149,7 @@ def polygon_iou(corners1: np.ndarray, corners2: np.ndarray) -> float:
     return float(inter_area / union_area) if union_area > 0 else 0.0
 
 
-def compute_obb_iou_matrix(gt_boxes: np.ndarray, pred_boxes: np.ndarray) -> np.ndarray:
+def _reference_iou_matrix(gt_boxes: np.ndarray, pred_boxes: np.ndarray) -> np.ndarray:
     """
     Compute pairwise IoU matrix between ground truth and predicted oriented boxes.
     Boxes are expected in format [cx, cy, w, h, angle_deg].
@@ -180,6 +180,44 @@ def compute_obb_iou_matrix(gt_boxes: np.ndarray, pred_boxes: np.ndarray) -> np.n
         iou_mat[i, j] = polygon_iou(gt_corners[i], pred_corners[j])
 
     return iou_mat
+
+def compute_obb_iou_matrix(gt_boxes, pred_boxes, device=None):
+    """Exact metric geometry, CUDA tensors when available, Shapely 2 on CPU.
+
+    Public NumPy-in/NumPy-out contract is unchanged. Pass device="cpu" for
+    reproducible Shapely reference comparisons on a CUDA host.
+    """
+    import torch
+    if device is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    if len(gt_boxes) == 0 or len(pred_boxes) == 0:
+        return np.zeros((len(gt_boxes), len(pred_boxes)), dtype=np.float32)
+    if str(device).startswith("cuda"):
+        from src.metrics.tensor_obb import pairwise_iou
+        with torch.no_grad():
+            return pairwise_iou(torch.as_tensor(gt_boxes, device=device, dtype=torch.float32),
+                                torch.as_tensor(pred_boxes, device=device, dtype=torch.float32)).cpu().numpy()
+    try:
+        import shapely
+        g = np.asarray([obb_to_corners(*b) for b in gt_boxes])
+        p = np.asarray([obb_to_corners(*b) for b in pred_boxes])
+        gp, pp = shapely.polygons(g), shapely.polygons(p)
+        lo_g, hi_g, lo_p, hi_p = g.min(1), g.max(1), p.min(1), p.max(1)
+        mask = ((hi_g[:, None] >= lo_p).all(-1) & (lo_g[:, None] <= hi_p).all(-1))
+        i, j = np.where(mask)
+        out = np.zeros((len(g), len(p)), dtype=np.float32)
+        inter = shapely.area(shapely.intersection(gp[i], pp[j]))
+        union = shapely.area(gp)[i] + shapely.area(pp)[j] - inter
+        out[i, j] = np.divide(inter, union, out=np.zeros_like(inter), where=union > 0)
+        return out
+    except (ImportError, AttributeError):
+        # Shapely 1 is exact, but slower. No approximate AABB metric fallback.
+        if Polygon is not None:
+            return _reference_iou_matrix(gt_boxes, pred_boxes)
+        from src.metrics.tensor_obb import pairwise_iou
+        return pairwise_iou(torch.as_tensor(gt_boxes, dtype=torch.float64),
+                            torch.as_tensor(pred_boxes, dtype=torch.float64)).numpy().astype(np.float32)
+
 
 def obb_to_gaussian_cov(w: float, h: float, angle_deg: float) -> np.ndarray:
     """

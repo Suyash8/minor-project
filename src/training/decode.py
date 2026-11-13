@@ -56,54 +56,38 @@ def decode_dense_grid(
         the img_size input, scores (N,), labels (N,)) after per-class
         rotated NMS.
     """
+    from src.metrics.tensor_obb import nms_per_class_tensor
     B, C, H, W = cls_logits.shape
-    stride_x = img_size / float(W)
-    stride_y = img_size / float(H)
-    cls_probs = torch.sigmoid(cls_logits)
-    obj_probs = torch.sigmoid(reg_preds[:, 6])
-
+    sx, sy = img_size/float(W), img_size/float(H)
     out = []
     for b in range(B):
-        score_map = cls_probs[b] * obj_probs[b].unsqueeze(0)  # (C, H, W)
         boxes_all, scores_all, labels_all = [], [], []
+        score_map = cls_logits[b].sigmoid()*reg_preds[b, 6].sigmoid()[None]
         for c in range(C):
-            mask = score_map[c] > conf_thresh
-            if not bool(mask.any()):
+            ys, xs = torch.where(score_map[c] > conf_thresh)
+            sc = score_map[c, ys, xs]
+            if not sc.numel():
                 continue
-            ys, xs = torch.where(mask)
-            sc = score_map[c][ys, xs]
             if sc.numel() > topk_per_class:
-                sc, topi = torch.topk(sc, topk_per_class)
-                ys, xs = ys[topi], xs[topi]
-            reg = reg_preds[b, :, ys, xs].float().cpu().numpy()  # (7, K)
-            sc_np = sc.float().cpu().numpy()
-            xs_np = xs.float().cpu().numpy()
-            ys_np = ys.float().cpu().numpy()
-
-            cx = (xs_np + 0.5 + reg[0]) * stride_x
-            cy = (ys_np + 0.5 + reg[1]) * stride_y
-            bw = np.exp(np.clip(reg[2], math.log(MIN_PRIOR_FRAC), 3.0)) * stride_x * W_PRIOR
-            bh = np.exp(np.clip(reg[3], math.log(MIN_PRIOR_FRAC), 3.0)) * stride_y * H_PRIOR
-            # atan2-halving fix (4b514c0): heads emit sin(2a)/cos(2a).
-            ang = np.degrees(np.arctan2(reg[4], reg[5]) / 2.0) % 180.0
-
-            boxes = np.stack([cx, cy, bw, bh, ang], axis=1).astype(np.float32)
-            boxes_all.append(boxes)
-            scores_all.append(sc_np.astype(np.float32))
-            labels_all.append(np.full(len(sc_np), c, dtype=np.int64))
-
+                sc, ids = sc.topk(topk_per_class)
+                ys, xs = ys[ids], xs[ids]
+            reg = reg_preds[b, :, ys, xs].float()
+            boxes_all.append(torch.stack(((xs+.5+reg[0])*sx,
+                (ys+.5+reg[1])*sy,
+                reg[2].clamp(math.log(MIN_PRIOR_FRAC), 3).exp()*sx*W_PRIOR,
+                reg[3].clamp(math.log(MIN_PRIOR_FRAC), 3).exp()*sy*H_PRIOR,
+                torch.rad2deg(torch.atan2(reg[4], reg[5])*.5) % 180), 1))
+            scores_all.append(sc.float())
+            labels_all.append(torch.full_like(xs, c))
         if boxes_all:
-            boxes = np.concatenate(boxes_all)
-            scores = np.concatenate(scores_all)
-            labels = np.concatenate(labels_all)
-            boxes, scores, labels = nms_per_class(boxes, scores, labels,
-                                                  iou_thresh=nms_iou,
-                                                  max_det=max_det)
+            boxes, scores, labels = torch.cat(boxes_all), torch.cat(scores_all), torch.cat(labels_all)
+            if boxes.is_cuda:
+                boxes, scores, labels = nms_per_class_tensor(boxes, scores, labels, nms_iou, max_det)
+                out.append(tuple(v.detach().cpu().numpy() for v in (boxes, scores, labels)))
+            else:
+                out.append(nms_per_class(*(v.detach().numpy() for v in (boxes, scores, labels)), nms_iou, max_det))
         else:
-            boxes = np.zeros((0, 5), dtype=np.float32)
-            scores = np.zeros((0,), dtype=np.float32)
-            labels = np.zeros((0,), dtype=np.int64)
-        out.append((boxes, scores, labels))
+            out.append((np.zeros((0,5), np.float32), np.zeros(0, np.float32), np.zeros(0, np.int64)))
     return out
 
 
@@ -123,30 +107,23 @@ def decode_detr(
     angle; sin(2a)/cos(2a) constrain it modulo 180, which is exactly the
     suite's angle range, so no halving is applied here (docstring corrected
     per review C)."""
-    B, Q, _ = cls_logits.shape
-    probs = torch.softmax(cls_logits, dim=-1)[..., :num_classes]  # drop background
+    from src.metrics.tensor_obb import nms_per_class_tensor
+    probs = cls_logits[..., :num_classes].sigmoid()
     out = []
-    for b in range(B):
-        pb = probs[b].float().cpu().numpy()          # (Q, C)
-        bn = boxes_norm[b].float().cpu().numpy()     # (Q, 4)
-        ar = angle_rad[b].float().cpu().numpy().reshape(-1)  # (Q,)
-        sc = pb.max(axis=1)
-        lb = pb.argmax(axis=1)
-        keep = sc > conf_thresh
-        if not bool(keep.any()):
-            out.append((np.zeros((0, 5), dtype=np.float32),
-                        np.zeros((0,), dtype=np.float32),
-                        np.zeros((0,), dtype=np.int64)))
-            continue
-        bn_k = bn[keep]
-        ang = np.degrees(ar[keep]) % 180.0
-        boxes = np.stack([bn_k[:, 0] * img_size, bn_k[:, 1] * img_size,
-                          bn_k[:, 2] * img_size, bn_k[:, 3] * img_size,
-                          ang], axis=1).astype(np.float32)
-        boxes, scores, labels = nms_per_class(
-            boxes, sc[keep].astype(np.float32), lb[keep].astype(np.int64),
-            iou_thresh=nms_iou, max_det=max_det)
-        out.append((boxes, scores, labels))
+    for b in range(len(cls_logits)):
+        # Independent foreground scores; one query can support several classes.
+        qi, labels = torch.where(probs[b] > conf_thresh)
+        scores = probs[b, qi, labels].float()
+        if len(scores) > max_det*4:
+            scores, ids = scores.topk(max_det*4)
+            qi, labels = qi[ids], labels[ids]
+        bn = boxes_norm[b, qi].float()*img_size
+        boxes = torch.cat((bn, torch.rad2deg(angle_rad[b, qi].float().reshape(-1, 1)) % 180), -1)
+        if boxes.is_cuda:
+            vals = nms_per_class_tensor(boxes, scores, labels, nms_iou, max_det)
+            out.append(tuple(v.detach().cpu().numpy() for v in vals))
+        else:
+            out.append(nms_per_class(*(v.detach().numpy() for v in (boxes, scores, labels)), nms_iou, max_det))
     return out
 
 

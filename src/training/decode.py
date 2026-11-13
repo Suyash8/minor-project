@@ -113,7 +113,7 @@ def decode_detr(
     angle_rad: torch.Tensor,
     img_size: int,
     num_classes: int,
-    conf_thresh: float = 0.05,
+    conf_thresh: float = 0.01,
     nms_iou: float = 0.45,
     max_det: int = 1000,  # 300 capped recall on dense scenes (review B)
 ) -> List[Tuple[np.ndarray, np.ndarray, np.ndarray]]:

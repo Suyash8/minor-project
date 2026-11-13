@@ -301,7 +301,7 @@ def validate_detr(
     class_names: List[str],
     max_batches: Optional[int] = None,
     compute_map: bool = True,
-    conf_thresh: float = 0.05,
+    conf_thresh: float = 0.01,
 ) -> Tuple[float, float, float]:
     """Validation pass: loss + mAP50 / mAP50-95 via the shared DETR decode."""
     net.eval()

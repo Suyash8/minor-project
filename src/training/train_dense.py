@@ -329,9 +329,7 @@ def validate_dense(
 
     val_loss = val_loss / max(n_batches, 1)
     if compute_map and all_gt:
-        print(f"\r  [val] computing mAP metrics across {len(class_names)} classes...    ", end="", flush=True)
         metrics = compute_map_metrics(all_gt, all_pred, class_names)
-        print("\r" + " " * 65 + "\r", end="", flush=True)
         return val_loss, float(metrics["map50"]), float(metrics["map50_95"])
     return val_loss, float("nan"), float("nan")
 

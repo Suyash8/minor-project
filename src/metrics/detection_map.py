@@ -35,11 +35,12 @@ def evaluate_class_multi_iou(
 ) -> Dict[float, Dict[str, Any]]:
     """
     Evaluate detection for a single class across multiple IoU thresholds in a
-    single geometry pass. Pairwise box IoUs are computed exactly once per prediction,
-    avoiding redundant O(N*M) Shapely polygon intersections.
+    single geometry pass. Pairwise box IoUs are batched per-image, avoiding
+    redundant O(N*M) Shapely polygon intersections.
     """
-    n_gt = 0
+    num_images = len(gt_list)
     filtered_gt_per_img = []
+    n_gt = 0
 
     for img_gt in gt_list:
         boxes = img_gt.get("boxes", np.zeros((0, 5)))
@@ -55,9 +56,22 @@ def evaluate_class_multi_iou(
         scores = img_pred.get("scores", np.zeros(0))
         areas = boxes[:, 2] * boxes[:, 3] if len(boxes) > 0 else np.zeros(0)
         mask = (areas >= scale_filter[0]) & (areas < scale_filter[1])
+        valid_boxes = boxes[mask]
+        valid_scores = scores[mask]
 
-        for b, s in zip(boxes[mask], scores[mask]):
-            all_preds.append((float(s), img_idx, b))
+        if len(valid_boxes) == 0:
+            continue
+
+        gt_boxes = filtered_gt_per_img[img_idx]
+        if len(gt_boxes) == 0:
+            for s in valid_scores:
+                all_preds.append((float(s), img_idx, -1, 0.0))
+        else:
+            iou_mat = compute_obb_iou_matrix(gt_boxes, valid_boxes)
+            for j in range(len(valid_boxes)):
+                best_gt_idx = int(np.argmax(iou_mat[:, j]))
+                best_iou = float(iou_mat[best_gt_idx, j])
+                all_preds.append((float(valid_scores[j]), img_idx, best_gt_idx, best_iou))
 
     results: Dict[float, Dict[str, Any]] = {}
     if n_gt == 0:
@@ -69,24 +83,12 @@ def evaluate_class_multi_iou(
 
     all_preds.sort(key=lambda x: x[0], reverse=True)
 
-    # Match each prediction to best ground-truth box once
-    pred_matches = []
-    for score, img_idx, p_box in all_preds:
-        gt_boxes = filtered_gt_per_img[img_idx]
-        if len(gt_boxes) == 0:
-            pred_matches.append((img_idx, -1, 0.0))
-        else:
-            ious = compute_obb_iou_matrix(gt_boxes, np.expand_dims(p_box, 0))[:, 0]
-            best_gt_idx = int(np.argmax(ious))
-            best_iou = float(ious[best_gt_idx])
-            pred_matches.append((img_idx, best_gt_idx, best_iou))
-
     for th in iou_thresholds:
         gt_matched_per_img = [np.zeros(len(b), dtype=bool) for b in filtered_gt_per_img]
         tp = np.zeros(len(all_preds))
         fp = np.zeros(len(all_preds))
 
-        for p_idx, (img_idx, best_gt_idx, best_iou) in enumerate(pred_matches):
+        for p_idx, (score, img_idx, best_gt_idx, best_iou) in enumerate(all_preds):
             if best_gt_idx >= 0 and best_iou >= th and not gt_matched_per_img[img_idx][best_gt_idx]:
                 tp[p_idx] = 1.0
                 gt_matched_per_img[img_idx][best_gt_idx] = True
@@ -153,6 +155,7 @@ def compute_map_metrics(
     classes_with_gt = []
 
     for c in range(num_classes):
+        print(f"\r  [val] mAP evaluation: class {c + 1}/{num_classes} ({class_names[c]})...    ", end="", flush=True)
         gt_cls = [all_gt[img][c] for img in range(num_images)]
         pred_cls = [all_preds[img][c] for img in range(num_images)]
 
@@ -176,6 +179,8 @@ def compute_map_metrics(
         n_gt_c = sum(len(g.get("boxes", [])) for g in gt_cls)
         if n_gt_c > 0:
             classes_with_gt.append(c)
+
+    print("\r" + " " * 65 + "\r", end="", flush=True)
 
     eval_indices = classes_with_gt if len(classes_with_gt) > 0 else list(range(num_classes))
     return {

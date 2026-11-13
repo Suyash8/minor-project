@@ -170,7 +170,7 @@ def test_yolo_xywhr_conversion() -> None:
 
     worst = 1.0
     for (cx, cy, w, h, ang) in cases:
-        corners = obb_to_corners(cx, cy, w, h, ang)
+        corners = obb_to_corners(cx, cy, w, h, ang).astype(np.float32)
         # Ultralytics canonical parameterization of the same rectangle
         ux, uy, uw, uh, ur = xyxyxyxy2xywhr(corners[None])[0]
         conv = np.array([ultralytics_xywhr_to_suite(ux, uy, uw, uh, ur)],

@@ -663,8 +663,31 @@ def main(argv: Optional[List[str]] = None) -> int:
                 for m in models:
                     job = state.job(ds, m)
                     if args.auto_resume and job["status"] == "done":
-                        print(f"[pipeline] skip {ds}/{m}: already done")
-                        continue
+                        # Target-epoch-aware resume: if user requests more epochs than
+                        # previously trained (e.g. tuned default 60/80 vs early 20-epoch run),
+                        # resume and continue rather than skipping.
+                        run_dir = job.get("run_dir") or _resolve_run_dir(args, ds, m)
+                        manifest_path = Path(run_dir) / "run_manifest.json"
+                        already_trained = 0
+                        if manifest_path.exists():
+                            try:
+                                m_data = json.loads(manifest_path.read_text())
+                                already_trained = int(m_data.get("final_metrics", {}).get("epochs_trained", 0))
+                            except Exception:
+                                pass
+                        tuned = apply_tuned_defaults(m, epochs=args.epochs, lr=args.lr,
+                                                     weight_decay=args.weight_decay,
+                                                     batch_size=args.batch, img_size=args.img_size,
+                                                     patience=args.patience)
+                        target_epochs = tuned.get("epochs")
+                        if target_epochs is not None and already_trained >= target_epochs:
+                            print(f"[pipeline] skip {ds}/{m}: already done ({already_trained}/{target_epochs} epochs)")
+                            continue
+                        elif target_epochs is not None and already_trained < target_epochs:
+                            print(f"[pipeline] resume {ds}/{m}: previously completed {already_trained} epochs, continuing to target {target_epochs} epochs")
+                        else:
+                            print(f"[pipeline] skip {ds}/{m}: already done")
+                            continue
                     print(f"\n[pipeline] === train {m} on {ds} ===")
                     run_train_job(ds, m, args, handles, state)
 

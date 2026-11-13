@@ -573,6 +573,14 @@ def train_dense_model(
             if start_epoch > epochs:
                 print(f"[*] Checkpoint already reached epoch {ckpt_epoch} >= target "
                       f"{epochs}. Nothing to do for '{model_name}'.")
+            elif getattr(scheduler, "T_max", epochs) != epochs:
+                print(f"[resume] adjusting cosine schedule: T_max {getattr(scheduler, 'T_max', epochs)} -> {epochs}")
+                scheduler.T_max = epochs
+                eta_min = getattr(scheduler, "eta_min", 1e-5)
+                target_lr = eta_min + 0.5 * (lr - eta_min) * (1.0 + math.cos(math.pi * ckpt_epoch / max(1, epochs)))
+                for g in optimizer.param_groups:
+                    g["lr"] = target_lr
+                print(f"[resume] continuous cosine LR set to {target_lr:.2e} for epoch {start_epoch}")
         except Exception as e:
             print(f"[!] Could not resume from checkpoint: {e}. Starting fresh.")
 

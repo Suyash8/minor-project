@@ -585,6 +585,21 @@ def train_detr_model(
             if start_epoch > epochs:
                 print(f"[*] Checkpoint already reached epoch {ckpt_epoch} >= target "
                       f"{epochs}. Nothing to do for '{model_name}'.")
+            else:
+                target_cos_max = max(1, epochs - warmup_epochs)
+                curr_base = base_scheduler
+                if hasattr(scheduler, "_schedulers") and len(scheduler._schedulers) > 1:
+                    curr_base = scheduler._schedulers[1]
+                if getattr(curr_base, "T_max", target_cos_max) != target_cos_max:
+                    print(f"[resume] adjusting DETR cosine schedule: T_max {getattr(curr_base, 'T_max', target_cos_max)} -> {target_cos_max}")
+                    curr_base.T_max = target_cos_max
+                    if ckpt_epoch >= warmup_epochs:
+                        cur_cos_step = ckpt_epoch - warmup_epochs
+                        eta_min = getattr(curr_base, "eta_min", 1e-6)
+                        target_lr = eta_min + 0.5 * (lr - eta_min) * (1.0 + math.cos(math.pi * cur_cos_step / max(1, target_cos_max)))
+                        for g in optimizer.param_groups:
+                            g["lr"] = target_lr
+                        print(f"[resume] continuous DETR LR set to {target_lr:.2e} for epoch {start_epoch}")
         except Exception as e:
             print(f"[!] Could not resume from checkpoint: {e}. Starting fresh.")
 

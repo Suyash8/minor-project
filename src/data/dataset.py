@@ -637,9 +637,10 @@ class AerialOBBDataset:
                 self._img_cache_bytes += nbytes
         if disk_path is not None:
             try:
+                self.disk_cache_dir.mkdir(parents=True, exist_ok=True)
                 free = shutil.disk_usage(str(self.disk_cache_dir)).free
                 if free > 2 * 1024 ** 3:
-                    tmp = disk_path.with_name(disk_path.name + ".part")
+                    tmp = disk_path.with_name(f"{disk_path.stem}.{os.getpid()}.part.npy")
                     np.save(tmp, arr)
                     os.replace(tmp, disk_path)
             except OSError as e:

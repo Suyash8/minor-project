@@ -327,7 +327,7 @@ def train_yolo_obb(
             try:
                 _snap_dir.mkdir(parents=True, exist_ok=True)
                 epoch = getattr(_trainer, "epoch", 0) or 0
-                for f in (last_pt, best_pt, save_dir / "results.csv"):
+                for f in (last_pt, best_pt, save_dir / "results.csv", save_dir / "train.log", save_dir / "args.yaml"):
                     if f.exists():
                         # B-round note 2: UNIQUE snapshot name per save -
                         # a fixed name could be overwritten by the next

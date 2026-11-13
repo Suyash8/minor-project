@@ -780,11 +780,17 @@ def train_dense_model(
                         st = staging.status()
                         staged_note = f" | staged {st.done}/{st.total} (drive reads {st.drive_reads})"
                     print(
-                        f"  [{model_name}] Epoch [{epoch:02d}/{epochs:02d}] "
+                        f"\r  [{model_name}] Epoch [{epoch:02d}/{epochs:02d}] "
                         f"Batch {b_idx + 1}/{total_train_batches} "
                         f"({(b_idx + 1) / total_train_batches * 100:.1f}%) | "
-                        f"Loss: {loss_val:.4f} | {fps:.1f} imgs/s{staged_note}",
+                        f"Loss: {loss_val:.4f} | {fps:.1f} imgs/s{staged_note}   ",
+                        end="",
                         flush=True,
+                    )
+                    logger.detail(
+                        f"Epoch {epoch:02d} Batch {b_idx + 1}/{total_train_batches} "
+                        f"({(b_idx + 1) / total_train_batches * 100:.1f}%) | "
+                        f"Loss: {loss_val:.4f} | Speed: {fps:.1f} imgs/s{staged_note}"
                     )
 
         if STOP.requested():
@@ -886,7 +892,8 @@ def train_dense_model(
         logger.log(epoch_record)
         history.append(epoch_record)
 
-        print(
+        print("\r" + " " * 85 + "\r", end="", flush=True)
+        summary_str = (
             f"Epoch [{epoch:02d}/{epochs:02d}] "
             f"Train: {train_loss:.4f} (cls {train_cls:.3f}, box {train_box:.3f}, "
             f"ang {train_ang:.3f}) | Val: {val_loss:.4f} | "
@@ -894,6 +901,8 @@ def train_dense_model(
             f"{'(*BEST*)' if is_best else ''} | LR: {cur_lr:.2e} | "
             f"{epoch_record['imgs_per_sec']} imgs/s | {epoch_time:.1f}s"
         )
+        print(summary_str)
+        logger.detail(summary_str)
 
         _save_epoch_checkpoint(
             last_weights_path, epoch=epoch, model_name=model_name,
@@ -912,7 +921,7 @@ def train_dense_model(
                 best_map50=best_map50, best_val_loss=best_val_loss,
                 num_classes=num_classes, config=config_snapshot)
 
-        mirror.submit_epoch(epoch, last_weights_path, logger.csv_path)
+        mirror.submit_epoch(epoch, last_weights_path, logger.csv_path, logger.log_path)
         if is_best:
             mirror.submit(best_weights_path)
 

@@ -32,6 +32,7 @@ def evaluate_class_multi_iou(
     pred_list: List[Dict[str, Any]],
     iou_thresholds: List[float],
     scale_filter: Tuple[float, float] = (0.0, float("inf")),
+    progress_prefix: Optional[str] = None,
 ) -> Dict[float, Dict[str, Any]]:
     """
     Evaluate detection for a single class across multiple IoU thresholds in a
@@ -52,6 +53,9 @@ def evaluate_class_multi_iou(
 
     all_preds = []
     for img_idx, img_pred in enumerate(pred_list):
+        if progress_prefix and (img_idx % 25 == 0 or img_idx + 1 == num_images):
+            print(f"\r{progress_prefix} img {img_idx + 1}/{num_images} ({len(all_preds)} preds)...   ", end="", flush=True)
+
         boxes = img_pred.get("boxes", np.zeros((0, 5)))
         scores = img_pred.get("scores", np.zeros(0))
         areas = boxes[:, 2] * boxes[:, 3] if len(boxes) > 0 else np.zeros(0)
@@ -155,12 +159,13 @@ def compute_map_metrics(
     classes_with_gt = []
 
     for c in range(num_classes):
-        print(f"\r  [val] mAP evaluation: class {c + 1}/{num_classes} ({class_names[c]})...    ", end="", flush=True)
+        c_name = class_names[c]
+        p_prefix = f"  [val] mAP [{c_name}] ({c + 1}/{num_classes}):"
         gt_cls = [all_gt[img][c] for img in range(num_images)]
         pred_cls = [all_preds[img][c] for img in range(num_images)]
 
         # Single-pass multi-threshold evaluation across range_ious (0.50 .. 0.95)
-        multi_res = evaluate_class_multi_iou(gt_cls, pred_cls, range_ious)
+        multi_res = evaluate_class_multi_iou(gt_cls, pred_cls, range_ious, progress_prefix=p_prefix)
         ap50_per_class.append(multi_res[0.50]["ap"])
         ap75_per_class.append(multi_res[0.75]["ap"])
 
@@ -180,7 +185,7 @@ def compute_map_metrics(
         if n_gt_c > 0:
             classes_with_gt.append(c)
 
-    print("\r" + " " * 65 + "\r", end="", flush=True)
+    print("\r" + " " * 85 + "\r", end="", flush=True)
 
     eval_indices = classes_with_gt if len(classes_with_gt) > 0 else list(range(num_classes))
     return {

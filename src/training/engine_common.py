@@ -297,7 +297,7 @@ def restore_from_mirror(mirror_dir: Optional[str], run_subdir: str,
     if not src_dir.is_dir():
         return []
     restored: List[str] = []
-    for name in ("last.pt", "best.pt", "results.csv", "epochs.jsonl"):
+    for name in ("last.pt", "best.pt", "results.csv", "epochs.jsonl", "train.log"):
         src = src_dir / name
         if not src.is_file():
             continue
@@ -326,13 +326,14 @@ RESULTS_CSV_COLUMNS = [
 
 
 class EpochLogger:
-    """Append-only per-epoch results.csv + epochs.jsonl in the run dir."""
+    """Append-only per-epoch results.csv + epochs.jsonl + detailed train.log in run dir."""
 
     def __init__(self, run_dir: Path):
         self.run_dir = Path(run_dir)
         self.run_dir.mkdir(parents=True, exist_ok=True)
         self.csv_path = self.run_dir / "results.csv"
         self.jsonl_path = self.run_dir / "epochs.jsonl"
+        self.log_path = self.run_dir / "train.log"
         if not self.csv_path.exists():
             with open(self.csv_path, "w", newline="") as f:
                 csv.DictWriter(f, fieldnames=RESULTS_CSV_COLUMNS).writeheader()
@@ -343,6 +344,15 @@ class EpochLogger:
                            extrasaction="ignore").writerow(row)
         with open(self.jsonl_path, "a") as f:
             f.write(json.dumps(row, default=str) + "\n")
+
+    def detail(self, message: str) -> None:
+        """Append a timestamped detail line to train.log for deep troubleshooting."""
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            with open(self.log_path, "a", encoding="utf-8") as f:
+                f.write(f"[{timestamp}] {message}\n")
+        except OSError:
+            pass
 
 
 # ---------------------------------------------------------------------------

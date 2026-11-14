@@ -11,6 +11,7 @@ from __future__ import annotations
 import time
 import math
 from abc import ABC, abstractmethod
+from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
 import numpy as np
 from PIL import Image
@@ -20,6 +21,37 @@ try:
     HAS_TORCH = True
 except ImportError:
     HAS_TORCH = False
+
+
+_STATE_PREFIXES = ("_orig_mod.", "module.")
+
+
+def unwrap_torch_module(module: Any) -> Any:
+    """Return the underlying module beneath torch.compile / DataParallel wrappers."""
+    while hasattr(module, "_orig_mod") or hasattr(module, "module"):
+        if hasattr(module, "_orig_mod"):
+            module = module._orig_mod
+        elif hasattr(module, "module"):
+            module = module.module
+        else:
+            break
+    return module
+
+
+def normalize_state_dict_keys(state: Dict[str, Any]) -> Dict[str, Any]:
+    """Strip wrapper prefixes (e.g. torch.compile `_orig_mod.`, DDP `module.`)."""
+    cleaned: Dict[str, Any] = {}
+    for k, v in state.items():
+        nk = k
+        changed = True
+        while changed:
+            changed = False
+            for prefix in _STATE_PREFIXES:
+                if nk.startswith(prefix):
+                    nk = nk[len(prefix):]
+                    changed = True
+        cleaned[nk] = v
+    return cleaned
 
 
 class BaseOBBDetector(ABC):
@@ -39,6 +71,22 @@ class BaseOBBDetector(ABC):
     def load(self, weights_path: Optional[str] = None) -> None:
         """Load model architecture and weights."""
         pass
+
+    def _load_net_weights(self, weights_path: Optional[str]) -> None:
+        """Load a PyTorch checkpoint into `self.net`, stripping wrapper prefixes cleanly."""
+        if not (weights_path and Path(weights_path).exists()):
+            return
+        checkpoint = torch.load(weights_path, map_location=self.device, weights_only=False)
+        if isinstance(checkpoint, dict) and "model_state" in checkpoint:
+            state = checkpoint["model_state"]
+        elif isinstance(checkpoint, dict):
+            state = checkpoint
+        else:
+            self.net = unwrap_torch_module(checkpoint).to(self.device)
+            self.net.eval()
+            return
+        cleaned = normalize_state_dict_keys(state)
+        self.net.load_state_dict(cleaned, strict=True)
 
     @abstractmethod
     def predict(

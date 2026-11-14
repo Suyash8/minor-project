@@ -110,7 +110,7 @@ def main(argv=None):
     runs_dir = common.default_runs_dir(a.runs_dir)
     runs = a.runs or discover_runs(runs_dir)
     if not runs:
-        sys.exit(f"no finished runs (best.pt) found under {runs_dir}")
+        sys.exit(f"no finished runs (best.pt/last.pt) found under {runs_dir}")
     if a.models:
         runs = [rd for rd in runs if run_info(rd)["model"] in a.models]
         if not runs:

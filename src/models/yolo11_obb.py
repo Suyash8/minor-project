@@ -122,7 +122,33 @@ class YOLO11OBBDetector(BaseOBBDetector):
         self.yolo_model = None
 
     def load(self, weights_path: Optional[str] = None) -> None:
-        """Instantiate YOLO11 architecture, attempting Ultralytics weights or native fallback."""
+        """Instantiate YOLO11 architecture, loading native PyTorch or Ultralytics checkpoints."""
+        from src.models.base import normalize_state_dict_keys, unwrap_torch_module
+
+        if weights_path and Path(weights_path).exists():
+            checkpoint = torch.load(weights_path, map_location=self.device, weights_only=False)
+            is_native_state = isinstance(checkpoint, dict) and (
+                "model_state" in checkpoint
+                or ("model" not in checkpoint and checkpoint and all(isinstance(v, torch.Tensor) for v in checkpoint.values()))
+            )
+            if is_native_state:
+                self.net = YOLO11OBBNet(num_classes=self.num_classes, base_c=32)
+                self.net.to(self.device)
+                self.net.eval()
+                state = checkpoint.get("model_state", checkpoint)
+                self.net.load_state_dict(normalize_state_dict_keys(state), strict=True)
+                self.num_params = sum(p.numel() for p in self.net.parameters())
+                self.is_loaded = True
+                print(f"[✓] Loaded Native YOLO11-OBB weights from {weights_path} ({self.num_params / 1e6:.2f}M params on {self.device})")
+                return
+            if not isinstance(checkpoint, dict) and isinstance(unwrap_torch_module(checkpoint), YOLO11OBBNet):
+                self.net = unwrap_torch_module(checkpoint).to(self.device)
+                self.net.eval()
+                self.num_params = sum(p.numel() for p in self.net.parameters())
+                self.is_loaded = True
+                print(f"[✓] Loaded Native YOLO11-OBB module from {weights_path} ({self.num_params / 1e6:.2f}M params on {self.device})")
+                return
+
         target_path = weights_path or f"{self.model_name}.pt"
         if Path(target_path).exists():
             try:
@@ -136,9 +162,11 @@ class YOLO11OBBDetector(BaseOBBDetector):
                 print(f"[✓] Loaded YOLO11-OBB from weights: {target_path} ({self.num_params / 1e6:.2f}M params on {self.device})")
                 return
             except Exception as e:
+                if weights_path is not None:
+                    raise RuntimeError(f"Failed to load explicit YOLO11-OBB weights '{weights_path}': {e}") from e
                 print(f"[*] Ultralytics weight load notice ({e}). Activating native YOLO11 architecture fallback.")
 
-        # Native PyTorch YOLO11 fallback
+        # Native PyTorch YOLO11 fallback (fresh initialization for training)
         self.net = YOLO11OBBNet(num_classes=self.num_classes, base_c=32)
         self.net.to(self.device)
         self.net.eval()

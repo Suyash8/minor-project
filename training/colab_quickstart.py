@@ -64,6 +64,9 @@ def main(argv=None) -> int:
     p.add_argument("--steps", default=None,
                    help="override the step list (default: restored queue's "
                         "steps, else the full preset)")
+    p.add_argument("--epochs", type=int, default=None,
+                   help="override epoch target when resuming (pass 0 to ignore "
+                        "any saved --epochs override and use model-tuned defaults)")
     p.add_argument("--mirror-dir", default=colab_recovery.DEFAULT_MIRROR_DIR)
     p.add_argument("--mirror-every", type=int, default=5)
     p.add_argument("--runs-dir", default=None,
@@ -130,6 +133,16 @@ def main(argv=None) -> int:
             cmd += ["--steps", steps]
         saved = rep.get("resume_invocation") or {}
         for key in ("epochs", "batch", "micro_batch", "img_size", "lr", "weight_decay", "patience", "data_dir"):
+            if key == "epochs":
+                if a.epochs is not None:
+                    if a.epochs > 0:
+                        cmd += ["--epochs", str(a.epochs)]
+                    else:
+                        print("[recover] clearing saved --epochs override; using model-tuned defaults", flush=True)
+                    continue
+                if saved.get("epochs") is not None:
+                    print(f"[recover] replaying saved --epochs {saved['epochs']} from pipeline_state.json "
+                          f"(pass --epochs 0 to resume up to model-tuned defaults)", flush=True)
             if saved.get(key) is not None:
                 cmd += ["--"+key.replace("_","-"), str(saved[key])]
         if saved.get("test"):
@@ -143,6 +156,8 @@ def main(argv=None) -> int:
                 "--datasets", *(a.datasets or ["all"]), "--mode", "full"]
         if a.steps:
             cmd += ["--steps", a.steps]
+        if a.epochs is not None and a.epochs > 0:
+            cmd += ["--epochs", str(a.epochs)]
     else:
         cmd += ["--models", "all", "--datasets", "mock", "--steps",
                 a.steps or "stage,train,eval,summary", "--test"]

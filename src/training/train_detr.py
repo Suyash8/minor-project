@@ -58,12 +58,14 @@ from src.training.engine_common import (
     load_rng_state,
     maybe_channels_last,
     maybe_compile,
+    normalize_state_dict_keys,
     resolved_config_snapshot,
     restore_from_mirror,
     rng_state_dict,
     save_training_checkpoint,
     seed_all,
     setup_perf_flags,
+    unwrap_model,
 )
 from src.training.train_dense import (
     GracefulStop,
@@ -377,11 +379,15 @@ def train_detr_model(
             ckpt = torch.load(last_weights_path, map_location=dev, weights_only=False)
             if ckpt.get("head_semantics") != "sigmoid-focal-v4.2":
                 print("[resume][WARNING] legacy softmax checkpoint: retaining weights/moments but switching foreground calibration to sigmoid focal; reconvergence required")
-            missing, unexpected = net.load_state_dict(ckpt["model_state"],
-                                                      strict=False)
+            raw_net = unwrap_model(net)
+            clean_state = normalize_state_dict_keys(ckpt["model_state"])
+            missing, unexpected = raw_net.load_state_dict(clean_state,
+                                                          strict=False)
             if missing or unexpected:
                 print(f"[resume][warn] state-dict mismatch: "
                       f"{len(missing)} missing, {len(unexpected)} unexpected keys")
+            if raw_net.state_dict() and len(missing) >= len(raw_net.state_dict()):
+                raise RuntimeError("zero matching keys loaded from checkpoint model_state")
             epochs_since_best = ckpt.get("epochs_since_best", 0)
             if "optimizer_state" in ckpt:
                 optimizer.load_state_dict(ckpt["optimizer_state"])
@@ -619,7 +625,7 @@ def train_detr_model(
             save_training_checkpoint(
                 last_weights_path,
                 epoch=epoch - 1, model_name=model_name,
-                dataset_name=dataset_name, model_state=net.state_dict(),
+                dataset_name=dataset_name, model_state=unwrap_model(net).state_dict(),
                 optimizer_state=optimizer.state_dict(),
                 scheduler_state=scheduler.state_dict(),
             head_semantics="sigmoid-focal-v4.2",
@@ -658,10 +664,11 @@ def train_detr_model(
                       f"for '{model_name}'", flush=True)
 
         # --- validation on EMA weights (W4.7) ------------------------------
+        raw_net = unwrap_model(net)
         backup_state = None
         if ema_tracker is not None:
-            backup_state = {k: v.detach().clone() for k, v in net.state_dict().items()}
-            net.load_state_dict(ema_tracker.ema_state, strict=False)
+            backup_state = {k: v.detach().clone() for k, v in raw_net.state_dict().items()}
+            raw_net.load_state_dict(ema_tracker.ema_state, strict=False)
         try:
             val_loss, val_map50, val_map5095 = validate_detr(
                 net, model_name, val_loader, criterion, dev, amp,
@@ -676,7 +683,7 @@ def train_detr_model(
             )
         finally:
             if backup_state is not None:
-                net.load_state_dict(backup_state, strict=False)
+                raw_net.load_state_dict(backup_state, strict=False)
 
         # Early stop on val mAP50 ONLY (W4.10, review R2): off-cadence
         # epochs (val_map_every > 1) did not measure mAP, so best.pt,
@@ -736,7 +743,7 @@ def train_detr_model(
         save_training_checkpoint(
             last_weights_path,
             epoch=epoch, model_name=model_name, dataset_name=dataset_name,
-            model_state=net.state_dict(),
+            model_state=unwrap_model(net).state_dict(),
             optimizer_state=optimizer.state_dict(),
             scheduler_state=scheduler.state_dict(),
             head_semantics="sigmoid-focal-v4.2",
@@ -752,8 +759,9 @@ def train_detr_model(
             save_training_checkpoint(
                 best_weights_path,
                 epoch=epoch, model_name=model_name, dataset_name=dataset_name,
-                model_state=(ema_tracker.ema_state if ema_tracker is not None
-                             else net.state_dict()),
+                model_state=(normalize_state_dict_keys(ema_tracker.ema_state)
+                             if ema_tracker is not None
+                             else unwrap_model(net).state_dict()),
                 best_map50=best_map50, best_val_loss=best_val_loss,
                 num_classes=num_classes, config=config_snapshot, head_semantics="sigmoid-focal-v4.2")
 

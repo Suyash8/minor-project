@@ -57,12 +57,14 @@ from src.training.engine_common import (
     load_rng_state,
     maybe_channels_last,
     maybe_compile,
+    normalize_state_dict_keys,
     resolved_config_snapshot,
     restore_from_mirror,
     rng_state_dict,
     save_training_checkpoint,
     seed_all,
     setup_perf_flags,
+    unwrap_model,
 )
 from src.utils.system import auto_configure_hardware
 
@@ -542,11 +544,15 @@ def train_dense_model(
     if resume and last_weights_path.exists():
         try:
             ckpt = torch.load(last_weights_path, map_location=dev, weights_only=False)
-            missing, unexpected = net.load_state_dict(ckpt["model_state"],
-                                                      strict=False)
+            raw_net = unwrap_model(net)
+            clean_state = normalize_state_dict_keys(ckpt["model_state"])
+            missing, unexpected = raw_net.load_state_dict(clean_state,
+                                                          strict=False)
             if missing or unexpected:
                 print(f"[resume][warn] state-dict mismatch: "
                       f"{len(missing)} missing, {len(unexpected)} unexpected keys")
+            if raw_net.state_dict() and len(missing) >= len(raw_net.state_dict()):
+                raise RuntimeError("zero matching keys loaded from checkpoint model_state")
             epochs_since_best = ckpt.get("epochs_since_best", 0)
             if "optimizer_state" in ckpt:
                 optimizer.load_state_dict(ckpt["optimizer_state"])
@@ -820,10 +826,11 @@ def train_dense_model(
 
         # --- validation (EMA weights when enabled; W4.7) -------------------
         eval_net = net
+        raw_net = unwrap_model(net)
         backup_state = None
         if ema_tracker is not None:
-            backup_state = {k: v.detach().clone() for k, v in net.state_dict().items()}
-            net.load_state_dict(ema_tracker.ema_state, strict=False)
+            backup_state = {k: v.detach().clone() for k, v in raw_net.state_dict().items()}
+            raw_net.load_state_dict(ema_tracker.ema_state, strict=False)
         try:
             val_loss, val_map50, val_map5095 = validate_dense(
                 eval_net, model_name, val_loader, criterion, dev, amp,
@@ -841,7 +848,7 @@ def train_dense_model(
             )
         finally:
             if backup_state is not None:
-                net.load_state_dict(backup_state, strict=False)
+                raw_net.load_state_dict(backup_state, strict=False)
 
         # Early stopping / best selection on val mAP50 ONLY (W4.10, review
         # R2): on off-cadence epochs (val_map_every > 1) mAP was not
@@ -916,8 +923,9 @@ def train_dense_model(
             save_training_checkpoint(
                 best_weights_path,
                 epoch=epoch, model_name=model_name, dataset_name=dataset_name,
-                model_state=(ema_tracker.ema_state if ema_tracker is not None
-                             else net.state_dict()),
+                model_state=(normalize_state_dict_keys(ema_tracker.ema_state)
+                             if ema_tracker is not None
+                             else unwrap_model(net).state_dict()),
                 best_map50=best_map50, best_val_loss=best_val_loss,
                 num_classes=num_classes, config=config_snapshot)
 
@@ -964,7 +972,7 @@ def _save_epoch_checkpoint(path: Path, *, epoch: int, model_name: str,
     save_training_checkpoint(
         path,
         epoch=epoch, model_name=model_name, dataset_name=dataset_name,
-        model_state=net.state_dict(),
+        model_state=unwrap_model(net).state_dict(),
         optimizer_state=optimizer.state_dict(),
         scheduler_state=scheduler.state_dict(),
         scaler_state=amp.state_dict(),

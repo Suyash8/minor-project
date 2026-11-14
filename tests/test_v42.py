@@ -276,6 +276,61 @@ def test_noop_recovery_preserves_eval_and_legacy_manifest():
         (run/'weights/last.pt').write_bytes(b'changed');assert not eval_weights_match(data,run/'weights/last.pt')
 
 
+def test_compile_prefixed_checkpoint_loads_all_models():
+    from src.config import DENSE_SUITE_MODELS, DETR_SUITE_MODELS
+    from src.models import get_model
+    with tempfile.TemporaryDirectory() as temp:
+        for name in DENSE_SUITE_MODELS + DETR_SUITE_MODELS:
+            det = get_model(name, device="cpu", num_classes=8)
+            det.load()
+            with torch.no_grad():
+                for p in det.net.parameters():
+                    p.fill_(0.1234)
+            prefixed = {f"_orig_mod.{k}": v.clone() for k, v in det.net.state_dict().items()}
+            ckpt_path = Path(temp) / f"{name}_last.pt"
+            torch.save({"model_state": prefixed, "epoch": 1, "num_classes": 8}, ckpt_path)
+
+            reloaded = get_model(name, device="cpu", num_classes=8)
+            reloaded.load(str(ckpt_path))
+            for k, v in reloaded.net.state_dict().items():
+                if v.is_floating_point():
+                    assert torch.allclose(v, det.net.state_dict()[k]), f"{name}:{k}"
+
+
+def test_discover_recovered_last_only_runs():
+    from training.common import discover_run_dirs, find_weights
+    with tempfile.TemporaryDirectory() as temp:
+        rd = Path(temp) / "train" / "visdrone_lsknet"
+        (rd / "weights").mkdir(parents=True)
+        last_pt = rd / "weights" / "last.pt"
+        last_pt.write_bytes(b"weights")
+        found = discover_run_dirs(temp)
+        assert found == [str(rd)], found
+        assert find_weights(str(rd)) == str(last_pt)
+
+
+def test_quickstart_epochs_override():
+    import json, unittest.mock
+    from training import colab_quickstart
+    with tempfile.TemporaryDirectory() as temp:
+        mir = Path(temp) / "mirror"; mir.mkdir()
+        runs = Path(temp) / "runs"; runs.mkdir()
+        (mir / "_suite").mkdir(parents=True)
+        (mir / "_suite" / "pipeline_state.json").write_text(json.dumps({
+            "models": ["lsknet"], "datasets": ["visdrone"],
+            "steps": ["train", "eval"],
+            "invocation": {"epochs": 20}, "jobs": [],
+        }))
+        seen = []
+        def fake_sh(cmd):
+            seen.append(cmd)
+        with unittest.mock.patch.object(colab_quickstart, "ensure_drive", return_value=False), \
+             unittest.mock.patch.object(colab_quickstart, "sh", side_effect=fake_sh):
+            colab_quickstart.main(["--mirror-dir", str(mir), "--runs-dir", str(runs), "--epochs", "0"])
+        run_cmds = [c for c in seen if len(c) > 1 and c[1] == "training/run.py" and "--env" not in c]
+        assert run_cmds and "--epochs" not in run_cmds[0], run_cmds
+
+
 if __name__=='__main__':
     torch.set_num_threads(2)
     tests=[v for k,v in list(globals().items()) if k.startswith('test_') and callable(v)]

@@ -32,7 +32,10 @@ from typing import Any, Callable, Dict, List, Optional
 import numpy as np
 import torch
 
+from src.models.base import normalize_state_dict_keys, unwrap_torch_module
 from src.utils.checkpoint import atomic_save_json
+
+unwrap_model = unwrap_torch_module
 
 
 # ---------------------------------------------------------------------------
@@ -144,8 +147,9 @@ class ModelEMA:
     def __init__(self, net: torch.nn.Module, decay: float = 0.9999):
         self.decay = decay
         self.updates = 0
+        raw_net = unwrap_model(net)
         self.ema_state = {k: v.detach().clone().float()
-                          for k, v in net.state_dict().items()}
+                          for k, v in raw_net.state_dict().items()}
 
     def _effective_decay(self) -> float:
         import math
@@ -157,7 +161,8 @@ class ModelEMA:
     def update(self, net: torch.nn.Module) -> None:
         self.updates += 1
         d = self._effective_decay()
-        for k, v in net.state_dict().items():
+        raw_net = unwrap_model(net)
+        for k, v in raw_net.state_dict().items():
             if v.dtype.is_floating_point:
                 self.ema_state[k].mul_(d).add_(v.detach().float(),
                                                alpha=1.0 - d)
@@ -166,12 +171,15 @@ class ModelEMA:
 
     def state_dict(self) -> Dict[str, Any]:
         return {"decay": self.decay, "updates": self.updates,
-                "ema_state": self.ema_state}
+                "ema_state": normalize_state_dict_keys(self.ema_state)}
 
     def load_state_dict(self, state: Dict[str, Any]) -> None:
         self.decay = state.get("decay", self.decay)
         self.updates = state.get("updates", 0)
-        self.ema_state = {k: v.float() for k, v in state["ema_state"].items()}
+        self.ema_state = {
+            k: v.float()
+            for k, v in normalize_state_dict_keys(state["ema_state"]).items()
+        }
 
 
 # ---------------------------------------------------------------------------

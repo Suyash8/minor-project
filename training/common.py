@@ -227,7 +227,7 @@ def discover_run_dirs(runs_dir: str, max_depth: int = 3) -> list[str]:
     for root, dirs, _files in os.walk(runs_dir):
         depth = root[len(runs_dir):].count(os.sep)
         if any(os.path.isfile(os.path.join(root, w)) for w in
-               ("weights/best.pt", "best.pt")):
+               ("weights/best.pt", "best.pt", "weights/last.pt", "last.pt")):
             out.append(root)
             dirs[:] = []
         elif depth >= max_depth - 1:

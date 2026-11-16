@@ -53,8 +53,8 @@ def run_info(run_dir: str) -> dict:
 
 
 def reusable_eval(rd: str, ds: str, split: str, weights: str,
-                  imgsz: int | None) -> dict | None:
-    """Existing eval JSON that is valid for this exact weights file."""
+                  imgsz: int | None, data_root: str | None = None) -> dict | None:
+    """Existing eval JSON that is valid for this exact weights file and dataset contents (F21)."""
     path = os.path.join(rd, f"eval_{ds}_{split}.json")
     if not os.path.isfile(path):
         return None
@@ -67,10 +67,14 @@ def reusable_eval(rd: str, ds: str, split: str, weights: str,
         return None
     if r.get("comparable", True) is False or not common.protocol_current(r):
         return None
-    if r.get("split", split) != split:
+    if r.get("split", split) != split or r.get("dataset", ds) != ds:
         return None
     if imgsz is not None and r.get("imgsz") not in (None, imgsz):
         return None
+    if data_root and r.get("dataset_fingerprint"):
+        cur_fp = common.dataset_split_fingerprint(data_root, ds, split)
+        if cur_fp and cur_fp != r.get("dataset_fingerprint"):
+            return None            # dataset labels/contents changed (F21)
     try:
         if not (float(r["map50"]) == float(r["map50"])
                 and float(r["map50_95"]) == float(r["map50_95"])):
@@ -137,7 +141,7 @@ def main(argv=None):
         for ds in a.datasets:
             try:
                 r = None if a.force else reusable_eval(
-                    rd, ds, a.split, weights, a.imgsz)
+                    rd, ds, a.split, weights, a.imgsz, data_root=data_root)
                 if r is not None:
                     print(f"[reuse] {ds}: valid eval for current weights "
                           f"({os.path.basename(r['json_path'])})")

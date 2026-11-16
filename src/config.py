@@ -199,6 +199,14 @@ MODEL_FAMILY: Dict[str, str] = (
     | {m: "detr" for m in DETR_SUITE_MODELS}
 )
 
+
+def model_implementation_kind(model_name: str) -> str:
+    """Explicitly distinguish Ultralytics pretrained checkpoints from local compact prototypes (F01)."""
+    key = str(model_name).lower().strip()
+    if key in YOLO_SUITE_MODELS:
+        return "ultralytics-pretrained"
+    return "local-compact-prototype"
+
 # Approximate relative training cost rank, used by the unified pipeline to
 # order jobs small/fast-first (so a time-limited Colab session finishes the
 # cheap models before it dies). Lower = cheaper.

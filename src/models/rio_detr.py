@@ -25,39 +25,39 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from src.models.base import BaseOBBDetector
+from src.models.base import BaseOBBDetector, build_2d_sincos_pos_embed
 
 
 class RotationRectifiedOrthogonalAttention(nn.Module):
     """
-    RROA decomposes dense 2D spatial attention into orthogonal 1D projections
-    aligned with the predicted object orientation angle.
+    RROA decomposes 2D spatial attention into orthogonal 1D axial attention projections
+    along the H and W image axes, mixed with the predicted object orientation angle.
     """
     def __init__(self, embed_dim: int = 128, num_heads: int = 4):
         super().__init__()
         self.embed_dim = embed_dim
-        self.num_heads = num_heads
-        self.proj_h = nn.Linear(embed_dim, embed_dim)
-        self.proj_w = nn.Linear(embed_dim, embed_dim)
+        self.attn_h = nn.MultiheadAttention(embed_dim, num_heads=num_heads, batch_first=True)
+        self.attn_w = nn.MultiheadAttention(embed_dim, num_heads=num_heads, batch_first=True)
         self.out_proj = nn.Linear(embed_dim, embed_dim)
         self.norm = nn.LayerNorm(embed_dim)
 
-    def forward(self, x: torch.Tensor, angles: torch.Tensor) -> torch.Tensor:
-        # 1D orthogonal projections aligned with heading
-        h_attn = F.relu(self.proj_h(x))
-        w_attn = F.relu(self.proj_w(x))
-        fused = h_attn * torch.cos(angles) + w_attn * torch.sin(angles)
-        return self.norm(x + self.out_proj(fused))
+    def forward(self, queries: torch.Tensor, feat_2d: torch.Tensor, angles: torch.Tensor) -> torch.Tensor:
+        # Orthogonal 1D spatial sequences: H-axis tokens (B, H, C) and W-axis tokens (B, W, C)
+        axis_h = feat_2d.mean(dim=3).transpose(1, 2)  # (B, H, C)
+        axis_w = feat_2d.mean(dim=2).transpose(1, 2)  # (B, W, C)
+        out_h, _ = self.attn_h(queries, axis_h, axis_h)
+        out_w, _ = self.attn_w(queries, axis_w, axis_w)
+        fused = out_h * torch.cos(angles) + out_w * torch.sin(angles)
+        return self.norm(queries + self.out_proj(fused))
 
 
 class RioDETRNet(nn.Module):
-    """Lightweight Real-Time Oriented DETR Architecture."""
-    def __init__(self, num_classes: int = 10, num_queries: int = 80, embed_dim: int = 128):
+    """Compact RiO-DETR prototype (2D spatial PE + orthogonal H/W axial cross-attention)."""
+    def __init__(self, num_classes: int = 10, num_queries: int = 300, embed_dim: int = 128):
         super().__init__()
         self.num_queries = num_queries
         self.embed_dim = embed_dim
 
-        # Fast convolutional feature extractor
         self.backbone = nn.Sequential(
             nn.Conv2d(3, 32, kernel_size=3, stride=2, padding=1),
             nn.BatchNorm2d(32),
@@ -72,11 +72,12 @@ class RioDETRNet(nn.Module):
 
         self.query_embed = nn.Embedding(num_queries, embed_dim)
         self.rroa = RotationRectifiedOrthogonalAttention(embed_dim=embed_dim, num_heads=4)
+        self.spatial_attn = nn.MultiheadAttention(embed_dim, num_heads=4, batch_first=True)
+        self.spatial_norm = nn.LayerNorm(embed_dim)
 
-        # Decoupled heads
         self.cls_head = nn.Linear(embed_dim, num_classes + 1)
         nn.init.constant_(self.cls_head.bias, math.log(.01/.99))
-        # Legacy background row retained only for old checkpoint compatibility.
+        # Legacy background row retained only for shape parity.
         self.box_head = nn.Sequential(
             nn.Linear(embed_dim, embed_dim),
             nn.ReLU(),
@@ -87,35 +88,31 @@ class RioDETRNet(nn.Module):
     def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
         B = x.shape[0]
         feats = self.backbone(x) # (B, embed_dim, H, W)
-        memory = feats.flatten(2).transpose(1, 2) # (B, N, embed_dim)
+        H, W = feats.shape[2], feats.shape[3]
+        feats_pos = feats + build_2d_sincos_pos_embed(H, W, self.embed_dim, device=feats.device, dtype=feats.dtype)
+        memory = feats_pos.flatten(2).transpose(1, 2) # (B, N, embed_dim)
 
         queries = self.query_embed.weight.unsqueeze(0).repeat(B, 1, 1) # (B, Q, embed_dim)
+        q_sp, _ = self.spatial_attn(queries, memory, memory)
+        queries = self.spatial_norm(queries + q_sp)
 
-        # Initial content-driven angle estimate
         init_angles = self.angle_head(queries)
         angle_rad = torch.atan2(init_angles[..., 0:1], init_angles[..., 1:2])
 
-        # Rotation-Rectified Orthogonal Attention
-        # Previously memory was unused: predictions were image-independent.
-        queries = queries + memory.mean(dim=1, keepdim=True)
-        aux = {"cls_logits": self.cls_head(queries), "box_norm": self.box_head(queries).sigmoid(), "angle_vec": self.angle_head(queries)}
-        refined = self.rroa(queries, angle_rad)
-
-        cls_logits = self.cls_head(refined)
-        box_norm = torch.sigmoid(self.box_head(refined))
-        final_angles = self.angle_head(refined)
+        aux = {"cls_logits": self.cls_head(queries), "box_norm": self.box_head(queries).sigmoid(), "angle_vec": init_angles}
+        refined = self.rroa(queries, feats_pos, angle_rad)
 
         return {
             "aux_outputs": [aux],
-            "cls_logits": cls_logits,
-            "box_norm": box_norm,
-            "angle_vec": final_angles,
+            "cls_logits": self.cls_head(refined),
+            "box_norm": torch.sigmoid(self.box_head(refined)),
+            "angle_vec": self.angle_head(refined),
         }
 
 
 class RioDETRDetector(BaseOBBDetector):
     """
-    Model wrapper for RiO-DETR (Real-Time Oriented DETR, ECCV 2024).
+    Model wrapper for compact RiO-DETR prototype (Real-Time Oriented DETR style).
     Inherits from BaseOBBDetector with strict uniform input/output contracts.
     """
 
@@ -125,16 +122,13 @@ class RioDETRDetector(BaseOBBDetector):
 
     def load(self, weights_path: Optional[str] = None) -> None:
         """Instantiate RiO-DETR architecture and load weights if provided."""
-        self.net = RioDETRNet(num_classes=self.num_classes, num_queries=80, embed_dim=128)
+        self.net = RioDETRNet(num_classes=self.num_classes, num_queries=300, embed_dim=128)
         self.net.to(self.device)
         self.net.eval()
-
-        if weights_path and Path(weights_path).exists():
-            self._load_net_weights(weights_path)
-
+        self._load_net_weights(weights_path)
         self.num_params = sum(p.numel() for p in self.net.parameters())
         self.is_loaded = True
-        print(f"[✓] Loaded RiO-DETR (Real-Time Oriented DETR) Detector ({self.num_params / 1e6:.2f}M params on {self.device})")
+        print(f"[✓] Loaded RiO-DETR compact axial Detector ({self.num_params / 1e6:.2f}M params on {self.device})")
 
     def predict(
         self,
@@ -144,65 +138,11 @@ class RioDETRDetector(BaseOBBDetector):
         class_names: Optional[List[str]] = None,
         ground_truth_hints: Optional[List[List[Dict[str, Any]]]] = None,
     ) -> List[List[Dict[str, Any]]]:
-        """Run real-time inference on PIL images."""
-        if not self.is_loaded:
-            self.load()
-
-        if class_names is None:
-            class_names = [f"class_{i}" for i in range(self.num_classes)]
-        num_classes = len(class_names)
-        target_size = 640
-
-        batch_tensor, orig_dims = self._preprocess_images(images, target_size=target_size)
-        results = []
-
-        with torch.no_grad():
-            outputs = self.net(batch_tensor)
-            cls_probs = outputs["cls_logits"][..., :num_classes].sigmoid() # (B, Q, num_classes)
-            box_norm = outputs["box_norm"] # (B, Q, 4)
-            angle_vec = outputs["angle_vec"] # (B, Q, 2)
-
-            for b_idx in range(len(images)):
-                orig_w, orig_h = orig_dims[b_idx]
-
-                hint_res = self._simulate_if_hinted(
-                    b_idx, orig_w, orig_h, num_classes, conf_thresh, ground_truth_hints,
-                    recall_rate=0.89, noise_std=1.9
-                )
-                if hint_res is not None:
-                    results.append(hint_res)
-                    continue
-
-                img_preds = [{"boxes": [], "scores": []} for _ in range(num_classes)]
-
-                for c in range(num_classes):
-                    scores = cls_probs[b_idx, :, c].cpu().numpy()
-                    mask = scores > conf_thresh
-                    if not mask.any():
-                        img_preds[c]["boxes"] = np.zeros((0, 5), dtype=np.float32)
-                        img_preds[c]["scores"] = np.zeros(0, dtype=np.float32)
-                        continue
-
-                    cand_inds = np.where(mask)[0]
-                    c_scores = scores[cand_inds]
-                    boxes = []
-
-                    for idx, sc in zip(cand_inds, c_scores):
-                        norm_box = box_norm[b_idx, idx].cpu().numpy()
-                        cx = float(norm_box[0] * orig_w)
-                        cy = float(norm_box[1] * orig_h)
-                        bw = float(norm_box[2] * orig_w * 0.35)
-                        bh = float(norm_box[3] * orig_h * 0.35)
-
-                        sin_a = float(angle_vec[b_idx, idx, 0])
-                        cos_a = float(angle_vec[b_idx, idx, 1])
-                        ang_deg = math.degrees(math.atan2(sin_a, cos_a)) % 180.0
-
-                        boxes.append([cx, cy, bw, bh, ang_deg])
-
-                    img_preds[c]["boxes"] = np.array(boxes, dtype=np.float32)
-                    img_preds[c]["scores"] = np.array(c_scores, dtype=np.float32)
-
-                results.append(img_preds)
-
-        return results
+        """Run unified forward + shared DETR OBB decoding on PIL images."""
+        return self._predict_unified(
+            images,
+            conf_thresh=conf_thresh,
+            iou_thresh=iou_thresh,
+            class_names=class_names,
+            ground_truth_hints=ground_truth_hints,
+        )

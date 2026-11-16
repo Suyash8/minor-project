@@ -37,11 +37,14 @@ def main() -> None:
     p.add_argument("--split", type=str, default="test")
     p.add_argument("--data-dir", type=str, default=None)
     p.add_argument("--batch-size", type=int, default=8)
-    p.add_argument("--device", type=str, default=None)
-    p.add_argument("--imgsz", type=int, default=1280)
-    p.add_argument("--iou-thresh", type=float, default=0.50)
-    p.add_argument("--conf-thresh", type=float, default=0.25)
-    p.add_argument("--max-samples", type=int, default=None)
+    p.add_argument("--device", default=None)
+    p.add_argument("--imgsz", type=int, default=None,
+                   help="default: read run's trained resolution from manifest (F17)")
+    p.add_argument("--iou-thresh", type=float, default=0.45)
+    p.add_argument("--conf-thresh", type=float, default=0.05)
+    p.add_argument("--max-samples", type=int, default=None,
+                   help="forwarded as max_batches cap to the unified evaluator")
+    p.add_argument("--allow-native-fallback", action="store_true")
     a = p.parse_args()
 
     from training import evaluate
@@ -61,26 +64,35 @@ def main() -> None:
         p.error("--weights requires --model in v4 (or use --run so the model "
                 "is read from run_manifest.json)")
 
+    max_batches = max(1, (a.max_samples + a.batch_size - 1) // a.batch_size) if a.max_samples else None
+
     if weights:
-        from src.training.dispatcher import get_model_family
+        from src.training.dispatcher import get_model_family, get_tuned_defaults
+        eff_imgsz = a.imgsz or int(get_tuned_defaults(a.model).get("img_size") or 1280)
         if get_model_family(a.model) == "yolo":
             for ds in (datasets or ["visdrone"]):
-                evaluate.evaluate_weights(weights, ds, split=a.split,
-                                          data_root=a.data_dir, imgsz=a.imgsz,
-                                          batch=a.batch_size, device=a.device)
+                evaluate.evaluate_yolo_unified(
+                    weights, ds, split=a.split, data_root=a.data_dir,
+                    imgsz=eff_imgsz, batch=a.batch_size, device=a.device,
+                    conf_thresh=a.conf_thresh, iou_thresh=a.iou_thresh,
+                    max_batches=max_batches, model_name=a.model,
+                )
         else:
             for ds in (datasets or ["visdrone"]):
-                evaluate.evaluate_generic(a.model, weights, ds, split=a.split,
-                                          data_root=a.data_dir, imgsz=a.imgsz,
-                                          batch=a.batch_size, device=a.device,
-                                          conf_thresh=a.conf_thresh,
-                                          iou_thresh=a.iou_thresh)
+                evaluate.evaluate_generic(
+                    a.model, weights, ds, split=a.split, data_root=a.data_dir,
+                    imgsz=eff_imgsz, batch=a.batch_size, device=a.device,
+                    conf_thresh=a.conf_thresh, iou_thresh=a.iou_thresh,
+                    max_batches=max_batches,
+                )
     else:
         for ds in (datasets or []):
-            evaluate.evaluate_run(run_dir, ds, split=a.split, imgsz=a.imgsz,
-                                  batch=a.batch_size, device=a.device,
-                                  data_root=a.data_dir,
-                                  model_name=a.model)
+            evaluate.evaluate_run(
+                run_dir, ds, split=a.split, imgsz=a.imgsz,
+                batch=a.batch_size, device=a.device,
+                data_root=a.data_dir, model_name=a.model,
+                allow_native_fallback=a.allow_native_fallback,
+            )
 
 
 if __name__ == "__main__":

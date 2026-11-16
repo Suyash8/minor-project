@@ -66,6 +66,7 @@ from src.training.engine_common import (
     seed_all,
     setup_perf_flags,
     unwrap_model,
+    write_bundle_manifest,
 )
 from src.training.train_dense import (
     GracefulStop,
@@ -96,23 +97,23 @@ def extract_detr_predictions(
         return cls_logits, boxes_norm, angle_rad
 
     elif "box_deltas" in outputs:
-        # AO2-DETR
+        # AO2-DETR: smooth unbounded sigmoid mapping (supports tiny <2px to full-image boxes, non-zero grad everywhere)
         deltas = outputs["box_deltas"]
-        cx = torch.clamp(0.5 + deltas[..., 0:1] * 0.4, 0.0, 1.0)
-        cy = torch.clamp(0.5 + deltas[..., 1:2] * 0.4, 0.0, 1.0)
-        w = torch.clamp(torch.exp(torch.clamp(deltas[..., 2:3], -2.0, 2.0)) * 0.3, 0.01, 1.0)
-        h = torch.clamp(torch.exp(torch.clamp(deltas[..., 3:4], -2.0, 2.0)) * 0.3, 0.01, 1.0)
+        cx = torch.sigmoid(deltas[..., 0:1])
+        cy = torch.sigmoid(deltas[..., 1:2])
+        w = 0.001 + 0.999 * torch.sigmoid(deltas[..., 2:3] - 2.5)
+        h = 0.001 + 0.999 * torch.sigmoid(deltas[..., 3:4] - 2.5)
         boxes_norm = torch.cat([cx, cy, w, h], dim=-1)
         angle_rad = deltas[..., 4:5]
         return cls_logits, boxes_norm, angle_rad
 
     elif "boxes" in outputs:
-        # OrientedFormer
+        # OrientedFormer: smooth unbounded sigmoid mapping (sub-10px capable with live gradients everywhere)
         raw_b = outputs["boxes"]
-        cx = torch.clamp(raw_b[..., 0:1], 0.0, 1.0)
-        cy = torch.clamp(raw_b[..., 1:2], 0.0, 1.0)
-        w = torch.clamp(torch.exp(torch.clamp(raw_b[..., 2:3], -2.0, 2.0)) * 0.2, 0.01, 1.0)
-        h = torch.clamp(torch.exp(torch.clamp(raw_b[..., 3:4], -2.0, 2.0)) * 0.2, 0.01, 1.0)
+        cx = torch.sigmoid(raw_b[..., 0:1])
+        cy = torch.sigmoid(raw_b[..., 1:2])
+        w = 0.001 + 0.999 * torch.sigmoid(raw_b[..., 2:3] - 2.5)
+        h = 0.001 + 0.999 * torch.sigmoid(raw_b[..., 3:4] - 2.5)
         boxes_norm = torch.cat([cx, cy, w, h], dim=-1)
         angle_rad = raw_b[..., 4:5]
         return cls_logits, boxes_norm, angle_rad
@@ -322,7 +323,7 @@ def train_detr_model(
     net = maybe_channels_last(net, dev, enabled=(dev.type == "cuda"))
     net = maybe_compile(
         net, compile_model,
-        probe=(lambda: net(torch.zeros(
+        probe=(lambda m: m(torch.zeros(
             1, 3, img_size, img_size, device=dev)) if compile_model else None))
 
     criterion = DETROBBLoss(num_classes=num_classes).to(dev)
@@ -371,12 +372,14 @@ def train_detr_model(
     start_epoch = 1
     best_map50 = -1.0
     best_val_loss = float("inf")
-    epochs_since_best = 0  # restored from the checkpoint on resume (review D)
+    best_epoch = None
+    epochs_since_best = 0  # eval-check counter restored on resume (review D)
     history: List[Dict[str, Any]] = []
 
     if resume and last_weights_path.exists():
         try:
-            ckpt = torch.load(last_weights_path, map_location=dev, weights_only=False)
+            from src.utils.security import safe_load_checkpoint
+            ckpt = safe_load_checkpoint(last_weights_path, map_location=dev, allow_unsafe_legacy=True)
             if ckpt.get("head_semantics") != "sigmoid-focal-v4.2":
                 print("[resume][WARNING] legacy softmax checkpoint: retaining weights/moments but switching foreground calibration to sigmoid focal; reconvergence required")
             raw_net = unwrap_model(net)
@@ -389,6 +392,7 @@ def train_detr_model(
             if raw_net.state_dict() and len(missing) >= len(raw_net.state_dict()):
                 raise RuntimeError("zero matching keys loaded from checkpoint model_state")
             epochs_since_best = ckpt.get("epochs_since_best", 0)
+            best_epoch = ckpt.get("best_epoch")
             if "optimizer_state" in ckpt:
                 optimizer.load_state_dict(ckpt["optimizer_state"])
             if "scheduler_state" in ckpt:
@@ -709,6 +713,7 @@ def train_detr_model(
         if is_best:
             best_map50 = val_map50 if not math.isnan(val_map50) else best_map50
             best_val_loss = val_loss
+            best_epoch = epoch
             epochs_since_best = 0
         elif map_evaluated or not val_map:
             epochs_since_best += 1
@@ -763,15 +768,29 @@ def train_detr_model(
                              if ema_tracker is not None
                              else unwrap_model(net).state_dict()),
                 best_map50=best_map50, best_val_loss=best_val_loss,
+                best_epoch=best_epoch,
                 num_classes=num_classes, config=config_snapshot, head_semantics="sigmoid-focal-v4.2")
 
+        if run_dir is not None:
+            bundle_path = write_bundle_manifest(
+                run_path,
+                last_path=last_weights_path,
+                last_epoch=epoch,
+                best_path=best_weights_path,
+                best_epoch=best_epoch,
+                selection_metric=("mAP50" if val_map else "val_loss"),
+                best_map50=best_map50,
+                best_val_loss=best_val_loss,
+                is_ema=(ema_tracker is not None),
+            )
+            mirror.submit(bundle_path)
         mirror.submit_epoch(epoch, last_weights_path, logger.csv_path, logger.log_path)
         if is_best:
             mirror.submit(best_weights_path)
 
         if patience and epochs_since_best >= patience:
-            print(f"[!] Early stopping at epoch {epoch}: no val mAP50 "
-                  f"improvement for {patience} epochs")
+            print(f"[!] Early stopping at epoch {epoch}: no improvement "
+                  f"for {epochs_since_best} eval check(s) (cadence={val_map_every} epoch(s))")
             break
 
     mirror_errors = mirror.finish()
@@ -787,6 +806,7 @@ def train_detr_model(
         "best_weights": str(best_weights_path),
         "last_weights": str(last_weights_path),
         "epochs_trained": max((int(row.get("epoch", 0)) for row in history), default=start_epoch-1),
+        "best_epoch": best_epoch,
         "best_map50": best_map50,
         "best_val_loss": best_val_loss,
         "oom_events": oom_events,

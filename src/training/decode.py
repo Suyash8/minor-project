@@ -127,6 +127,29 @@ def decode_detr(
     return out
 
 
+def inverse_letterbox_params(orig_w: int, orig_h: int, imgsz: int) -> Tuple[float, int, int]:
+    """(inverse scale, pad_x, pad_y) mapping letterbox px -> original px."""
+    scale = imgsz / float(max(orig_h, orig_w))
+    new_w, new_h = int(round(orig_w * scale)), int(round(orig_h * scale))
+    pad_x = (imgsz - new_w) // 2
+    pad_y = (imgsz - new_h) // 2
+    return 1.0 / scale, pad_x, pad_y
+
+
+def unletterbox_boxes(boxes: np.ndarray, orig_w: int, orig_h: int, imgsz: int) -> np.ndarray:
+    """Map xywhr (degrees) boxes from letterboxed imgsz frame -> original px."""
+    boxes = np.asarray(boxes, dtype=np.float32).reshape(-1, 5)
+    if len(boxes) == 0:
+        return boxes
+    inv, pad_x, pad_y = inverse_letterbox_params(orig_w, orig_h, imgsz)
+    out = boxes.copy()
+    out[:, 0] = (out[:, 0] - pad_x) * inv
+    out[:, 1] = (out[:, 1] - pad_y) * inv
+    out[:, 2] *= inv
+    out[:, 3] *= inv
+    return out
+
+
 def to_metric_format(
     decoded: List[Tuple[np.ndarray, np.ndarray, np.ndarray]],
     num_classes: int,

@@ -277,11 +277,15 @@ def evaluate_yolo_unified(
     else:
         imgs_per_s = n_images / max(wall_s, 1e-6)
         timing_basis = "wall-clock (single batch; no warmup window)"
+    from src.config import model_implementation_kind
     res: Dict[str, Any] = dict(
         comparable=True,
         weights=os.path.abspath(weights), weights_fingerprint=common.weights_fingerprint(weights),
+        weights_selection=("best" if os.path.basename(weights) == "best.pt" else "last"),
+        dataset_fingerprint=common.dataset_split_fingerprint(data_root, dataset, split),
         model=(model_name or os.path.basename(
             os.path.dirname(os.path.abspath(weights)))),
+        implementation=model_implementation_kind(model_name or ""),
         family="yolo", protocol="src/metrics (unified)", metric_version="v4.2-greedy-unmatched",
         dataset=dataset, split=split, imgsz=imgsz,
         coord_space="original image px (preds inverse-letterbox, GT raw, R3+B1)",
@@ -348,86 +352,17 @@ def _original_gt_per_class(raw, idx: int, orig_w: int, orig_h: int,
     return out
 
 
-def _inverse_letterbox_params(orig_w: int, orig_h: int, imgsz: int):
-    """(inverse scale, pad_x, pad_y) mapping letterbox px -> original px.
-
-    Mirrors src.data.augment.letterbox exactly (uniform scale on the long
-    side, centered padding), so it is the exact inverse of the transform
-    applied to GT corners.
-    """
-    scale = imgsz / float(max(orig_h, orig_w))
-    new_w, new_h = int(round(orig_w * scale)), int(round(orig_h * scale))
-    pad_x = (imgsz - new_w) // 2
-    pad_y = (imgsz - new_h) // 2
-    return 1.0 / scale, pad_x, pad_y
-
-
-def _unletterbox_boxes(boxes: np.ndarray, orig_w: int, orig_h: int,
-                       imgsz: int) -> np.ndarray:
-    """xywhr (degrees) boxes from the letterboxed imgsz frame -> original
-    image frame (review R3: area bands must be measured in original-image
-    px so small/medium/large are comparable across per-family imgsz).
-    Uniform scale + translation preserves angle.
-    """
-    boxes = np.asarray(boxes, dtype=np.float32).reshape(-1, 5)
-    if len(boxes) == 0:
-        return boxes
-    inv, pad_x, pad_y = _inverse_letterbox_params(orig_w, orig_h, imgsz)
-    out = boxes.copy()
-    out[:, 0] = (out[:, 0] - pad_x) * inv
-    out[:, 1] = (out[:, 1] - pad_y) * inv
-    out[:, 2] *= inv
-    out[:, 3] *= inv
-    return out
+from src.training.decode import inverse_letterbox_params as _inverse_letterbox_params
+from src.training.decode import unletterbox_boxes as _unletterbox_boxes
 
 
 def _confusion_update(cm: np.ndarray,
                       gt: List[Dict[str, Any]],
                       pred: List[Dict[str, Any]],
                       iou_thresh: float = 0.5) -> None:
-    """Greedy score-ordered matching; cm[gt, pred], last index = background."""
-    from src.metrics.geometry import compute_obb_iou_matrix
-
-    nc1 = cm.shape[0] - 1
-    gt_boxes, gt_labels = [], []
-    for c, entry in enumerate(gt):
-        for b in entry["boxes"]:
-            gt_boxes.append(b)
-            gt_labels.append(c)
-    pred_boxes, pred_scores, pred_labels = [], [], []
-    for c, entry in enumerate(pred):
-        for b, s in zip(entry["boxes"], entry["scores"]):
-            pred_boxes.append(b)
-            pred_scores.append(float(s))
-            pred_labels.append(c)
-
-    if not gt_boxes and not pred_boxes:
-        return
-    if not gt_boxes:
-        for pl in pred_labels:
-            cm[nc1, pl] += 1
-        return
-    if not pred_boxes:
-        for gl in gt_labels:
-            cm[gl, nc1] += 1
-        return
-
-    gt_arr = np.stack(gt_boxes).astype(np.float32)
-    pred_arr = np.stack(pred_boxes).astype(np.float32)
-    iou = compute_obb_iou_matrix(gt_arr, pred_arr)  # (G, P)
-    order = np.argsort(-np.asarray(pred_scores))
-    matched_gt: set = set()
-    for p_idx in order:
-        col = iou[:, p_idx]
-        g_idx = int(np.argmax(col))
-        if col[g_idx] >= iou_thresh and g_idx not in matched_gt:
-            matched_gt.add(g_idx)
-            cm[gt_labels[g_idx], pred_labels[p_idx]] += 1
-        else:
-            cm[nc1, pred_labels[p_idx]] += 1
-    for g_idx, gl in enumerate(gt_labels):
-        if g_idx not in matched_gt:
-            cm[gl, nc1] += 1
+    """Delegate confusion update to the shared unmatched-GT greedy matcher (F12)."""
+    from src.metrics.confusion_matrix import update_confusion_matrix_image
+    update_confusion_matrix_image(cm, gt, pred, iou_threshold=iou_thresh)
 
 
 def evaluate_generic(
@@ -578,9 +513,12 @@ def evaluate_generic(
     else:
         imgs_per_s = n_images / max(wall_s, 1e-6)
         timing_basis = "wall-clock (single batch; no warmup window)"
+    from src.config import model_implementation_kind
     res: Dict[str, Any] = dict(
         weights=os.path.abspath(weights), weights_fingerprint=common.weights_fingerprint(weights),
-        model=model_name, family=family,
+        weights_selection=("best" if os.path.basename(weights) == "best.pt" else "last"),
+        dataset_fingerprint=common.dataset_split_fingerprint(data_root, dataset, split),
+        model=model_name, implementation=model_implementation_kind(model_name), family=family,
         protocol="src/metrics (unified)", comparable=True, metric_version="v4.2-greedy-unmatched",
         dataset=dataset, split=split, imgsz=imgsz,
         coord_space="original image px (preds inverse-letterbox, GT raw, R3+B1)",

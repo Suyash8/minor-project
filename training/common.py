@@ -290,6 +290,36 @@ def weights_fingerprint(path):
     return {"sha256":hasher.hexdigest(),"size":os.path.getsize(path)}
 
 
+def dataset_split_fingerprint(data_root: str | None, ds: str, split: str = "test") -> str | None:
+    """Content SHA-256 over label relpaths+bytes + image filenames/sizes for (ds, split) (F21)."""
+    import hashlib
+    if not data_root:
+        return None
+    ds_dir = os.path.join(data_root, ds, split)
+    if not os.path.isdir(ds_dir):
+        return None
+    hasher = hashlib.sha256()
+    lbl_dir = os.path.join(ds_dir, "labels")
+    img_dir = os.path.join(ds_dir, "images")
+    if os.path.isdir(lbl_dir):
+        for fn in sorted(os.listdir(lbl_dir)):
+            p = os.path.join(lbl_dir, fn)
+            if os.path.isfile(p):
+                hasher.update(fn.encode("utf-8", errors="replace"))
+                with open(p, "rb") as fh:
+                    hasher.update(fh.read())
+    if os.path.isdir(img_dir):
+        for fn in sorted(os.listdir(img_dir)):
+            p = os.path.join(img_dir, fn)
+            if os.path.isfile(p):
+                try:
+                    sz = os.path.getsize(p)
+                except OSError:
+                    sz = -1
+                hasher.update(f"{fn}:{sz}\n".encode("utf-8", errors="replace"))
+    return hasher.hexdigest()
+
+
 def eval_weights_match(result,weights):
     try:
         return result.get("weights_fingerprint")==weights_fingerprint(weights)

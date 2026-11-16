@@ -288,6 +288,22 @@ def _resolve_run_dir(args: argparse.Namespace, dataset: str, model: str) -> str:
     return str(Path(args.runs_dir) / "train" / f"{dataset}_{model}")
 
 
+def _git_dirty_info() -> Dict[str, Any]:
+    """Capture working-tree cleanliness + patch hash for immutable segment lineage (F14)."""
+    import hashlib, subprocess
+    try:
+        st = subprocess.run(["git", "status", "--porcelain"], capture_output=True, text=True, timeout=5)
+        dirty = bool(st.stdout.strip()) if st.returncode == 0 else None
+        diff_hash = None
+        if dirty:
+            df = subprocess.run(["git", "diff", "HEAD"], capture_output=True, timeout=5)
+            if df.returncode == 0:
+                diff_hash = hashlib.sha256(df.stdout).hexdigest()
+        return {"git_dirty": dirty, "dirty_patch_sha256": diff_hash}
+    except Exception:
+        return {"git_dirty": None, "dirty_patch_sha256": None}
+
+
 def run_train_job(dataset: str, model: str, args: argparse.Namespace,
                   handles: Dict[str, StageHandle],
                   state: PipelineState) -> Dict[str, Any]:
@@ -300,8 +316,9 @@ def run_train_job(dataset: str, model: str, args: argparse.Namespace,
         model, epochs=args.epochs, lr=args.lr, weight_decay=args.weight_decay,
         batch_size=args.batch, img_size=args.img_size, patience=args.patience)
 
-    # W7.1: the manifest marks the run unfinished until final_metrics land;
-    # --auto-resume scans for exactly this.
+    # W7.1 + F14: keep top-level manifest AND append an immutable segment record
+    # on every invocation so resumed runs preserve exact commit/dataset/config lineage.
+    from src.config import model_implementation_kind
     manifest_path = Path(run_dir) / "run_manifest.json"
     manifest: Dict[str, Any] = {}
     if manifest_path.exists():
@@ -309,22 +326,51 @@ def run_train_job(dataset: str, model: str, args: argparse.Namespace,
             manifest = json.loads(manifest_path.read_text())
         except Exception:
             manifest = {}
+    started_at = datetime.now(timezone.utc).isoformat()
+    last_pt = Path(run_dir) / "weights" / "last.pt"
+    resume_sha = None
+    if args.auto_resume and last_pt.is_file():
+        try:
+            resume_sha = common.weights_fingerprint(str(last_pt))["sha256"]
+        except OSError:
+            resume_sha = None
+    handle = handles.get(dataset)
+    eff_data_root = handle.src_root if handle is not None else args.data_dir
+    ds_fp = common.dataset_split_fingerprint(eff_data_root, dataset, "train")
+    dirty_info = _git_dirty_info()
+    segment = {
+        "segment_index": len(manifest.get("segments") or []),
+        "started_at": started_at,
+        "git_commit": common.git_commit(),
+        **dirty_info,
+        "pipeline_version": PIPELINE_VERSION,
+        "implementation": model_implementation_kind(model),
+        "resolved_tuning": tuned,
+        "dataset_train_fingerprint": ds_fp,
+        "resume_from_last_sha256": resume_sha,
+        "ema": bool(args.ema),
+        "compile": bool(args.compile),
+        "seed": args.seed,
+        "status": "running",
+    }
+    manifest.setdefault("segments", []).append(segment)
     manifest.update({
         "model": model, "dataset": dataset,
+        "implementation": model_implementation_kind(model),
         "git_commit": common.git_commit(),
+        **dirty_info,
         "pipeline_version": PIPELINE_VERSION,
         "resolved_tuning": tuned,
         "status": "running",
         "test_mode": bool(args.test),
         "data_root": str(args.data_dir),
-        "updated": datetime.now(timezone.utc).isoformat(),
+        "updated": started_at,
     })
-    manifest.setdefault("created", datetime.now(timezone.utc).isoformat())
+    manifest.setdefault("created", started_at)
     manifest_path.write_text(json.dumps(manifest, indent=2))
 
     t0 = time.time()
     try:
-        handle = handles.get(dataset)
         result = train_model(
             model_name=model,
             dataset_name=dataset,
@@ -361,16 +407,24 @@ def run_train_job(dataset: str, model: str, args: argparse.Namespace,
         )
         state.set_job(dataset, model, status="done", error=None, traceback=None)
         result["wall_time_s"] = round(time.time() - t0, 1)
+        ended_at = datetime.now(timezone.utc).isoformat()
         manifest["status"] = "done"
         manifest["final_metrics"] = {
             "best_map50": result.get("best_map50"),
             "best_val_loss": result.get("best_val_loss"),
+            "best_epoch": result.get("best_epoch"),
             "epochs_trained": result.get("epochs_trained"),
             "oom_events": result.get("oom_events"),
             "wall_time_s": result["wall_time_s"],
             "mirror_errors": result.get("mirror_errors", []),
         }
-        manifest["updated"] = datetime.now(timezone.utc).isoformat()
+        segment.update({
+            "ended_at": ended_at,
+            "status": "done",
+            "end_epoch": result.get("epochs_trained"),
+            "best_epoch": result.get("best_epoch"),
+        })
+        manifest["updated"] = ended_at
         manifest_path.write_text(json.dumps(manifest, indent=2))
         mirror_run_metadata(run_dir, args.mirror_dir)
         return result
@@ -379,6 +433,7 @@ def run_train_job(dataset: str, model: str, args: argparse.Namespace,
         # engine; keep the job pending so --auto-resume replays it.
         state.set_job(dataset, model, status="pending",
                       error="interrupted (signal)")
+        segment.update({"ended_at": datetime.now(timezone.utc).isoformat(), "status": "interrupted"})
         manifest["status"] = "interrupted"
         manifest["updated"] = datetime.now(timezone.utc).isoformat()
         manifest_path.write_text(json.dumps(manifest, indent=2))
@@ -386,6 +441,9 @@ def run_train_job(dataset: str, model: str, args: argparse.Namespace,
     except KeyboardInterrupt:
         state.set_job(dataset, model, status="pending",
                       error="interrupted (SIGINT)")
+        segment.update({"ended_at": datetime.now(timezone.utc).isoformat(), "status": "interrupted"})
+        manifest["status"] = "interrupted"
+        manifest_path.write_text(json.dumps(manifest, indent=2))
         raise
     except Exception as e:
         tb = traceback.format_exc()
@@ -397,6 +455,12 @@ def run_train_job(dataset: str, model: str, args: argparse.Namespace,
             manifest = {}
             if manifest_path.exists():
                 manifest = json.loads(manifest_path.read_text())
+            if manifest.get("segments"):
+                manifest["segments"][-1].update({
+                    "ended_at": datetime.now(timezone.utc).isoformat(),
+                    "status": "failed",
+                    "error": str(e),
+                })
             manifest.update({
                 "status": "failed", "error": str(e), "traceback": tb,
                 "model": model, "dataset": dataset,
@@ -416,7 +480,10 @@ def mirror_run_metadata(run_dir, mirror_dir):
     from src.training.engine_common import DriveMirror
     mirror = DriveMirror(mirror_dir, run_subdir=Path(run_dir).name)
     for file in Path(run_dir).iterdir():
-        if file.is_file() and (file.name == "run_manifest.json" or file.name.startswith("eval_")):
+        if file.is_file() and (
+            file.name in ("run_manifest.json", "bundle_manifest.json")
+            or file.name.startswith("eval_")
+        ):
             mirror.submit(file)
     mirror.finish()
 

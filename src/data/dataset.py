@@ -5,9 +5,10 @@ Parses annotations from YOLO-OBB, DOTA polygon, and VisDrone formats into a stan
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 import os
-import pickle
 import shutil
 import sys
 import zipfile
@@ -26,21 +27,22 @@ except ImportError:
 from src.config import DATASET_CLASSES, DATASET_STATIC_PATHS, CLEANED_DATASET_CLASSES, cleaned_data_root
 
 
-def _annotation_fingerprint(label_paths: List[Path]) -> Tuple[int, int, int]:
-    """Cheap cache-invalidation fingerprint: file count + total size + max mtime.
-    Any label edit, add or delete changes at least one component."""
-    n = 0
-    total = 0
-    max_mtime = 0
-    for p in label_paths:
+def _annotation_fingerprint(label_paths: List[Path]) -> str:
+    """Content-addressed SHA-256 fingerprint over label paths, sizes, and bytes (F21).
+
+    Catches equal-size content edits even if aggregate byte size and mtime match.
+    """
+    hasher = hashlib.sha256()
+    for p in sorted(label_paths, key=lambda x: str(x)):
         try:
             st = p.stat()
+            hasher.update(f"{p.name}:{st.st_size}:{st.st_mtime_ns}\n".encode("utf-8", errors="replace"))
+            with p.open("rb") as fh:
+                for chunk in iter(lambda: fh.read(65536), b""):
+                    hasher.update(chunk)
         except OSError:
             continue
-        n += 1
-        total += st.st_size
-        max_mtime = max(max_mtime, st.st_mtime_ns)
-    return n, total, max_mtime
+    return hasher.hexdigest()
 
 def polygon_to_obb_params(pts: np.ndarray) -> Tuple[float, float, float, float, float]:
     """
@@ -176,12 +178,12 @@ class AerialOBBDataset:
         cache_path = self._cache_path()
         if cache_path and cache_path.exists():
             try:
-                with open(cache_path, "rb") as f:
-                    blob = pickle.load(f)
+                with open(cache_path, "r", encoding="utf-8") as f:
+                    blob = json.load(f)
                 if blob.get("fingerprint") == fp and len(blob.get("entries", [])) == len(self.samples):
                     return blob["entries"]
             except Exception:
-                pass  # corrupt or stale cache: rebuild below
+                pass  # corrupt, legacy pickle, or stale cache: rebuild as safe JSON below
 
         entries: List[Optional[Dict[str, Any]]] = []
         for sample in self.samples:
@@ -194,9 +196,8 @@ class AerialOBBDataset:
         if cache_path:
             try:
                 tmp = cache_path.with_suffix(cache_path.suffix + f".{os.getpid()}.tmp")
-                with open(tmp, "wb") as f:
-                    pickle.dump({"fingerprint": fp, "entries": entries}, f,
-                                protocol=pickle.HIGHEST_PROTOCOL)
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump({"fingerprint": fp, "entries": entries}, f)
                 os.replace(tmp, cache_path)
             except OSError:
                 pass  # read-only directory (e.g. Drive): caching just skips

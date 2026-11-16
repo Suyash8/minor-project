@@ -125,17 +125,16 @@ class LSKNetDetector(BaseOBBDetector):
         self.net = None
 
     def load(self, weights_path: Optional[str] = None) -> None:
-        """Instantiate LSKNet architecture and load weights if provided."""
+        """Instantiate compact local LSKNet prototype and load weights if provided."""
         self.net = LSKNet(num_classes=self.num_classes, embed_dim=96)
         self.net.to(self.device)
         self.net.eval()
 
-        if weights_path and Path(weights_path).exists():
-            self._load_net_weights(weights_path)
+        self._load_net_weights(weights_path)
 
         self.num_params = sum(p.numel() for p in self.net.parameters())
         self.is_loaded = True
-        print(f"[✓] Loaded LSKNet (Large Selective Kernel Network) Detector ({self.num_params / 1e6:.2f}M params on {self.device})")
+        print(f"[✓] Loaded LSKNet compact prototype Detector ({self.num_params / 1e6:.2f}M params on {self.device})")
 
     def predict(
         self,
@@ -145,72 +144,11 @@ class LSKNetDetector(BaseOBBDetector):
         class_names: Optional[List[str]] = None,
         ground_truth_hints: Optional[List[List[Dict[str, Any]]]] = None,
     ) -> List[List[Dict[str, Any]]]:
-        """Run LSKNet inference on PIL images."""
-        if not self.is_loaded:
-            self.load()
-
-        if class_names is None:
-            class_names = [f"class_{i}" for i in range(self.num_classes)]
-        num_classes = len(class_names)
-        target_size = 640
-
-        batch_tensor, orig_dims = self._preprocess_images(images, target_size=target_size)
-        results = []
-
-        with torch.no_grad():
-            cls_logits, reg_out, (feat_h, feat_w) = self.net(batch_tensor)
-            cls_probs = torch.sigmoid(cls_logits) # (B, C, H, W)
-            obj_probs = torch.sigmoid(reg_out[:, 6, :, :]) # (B, H, W)
-            stride = target_size / feat_w
-
-            for b_idx in range(len(images)):
-                orig_w, orig_h = orig_dims[b_idx]
-
-                hint_res = self._simulate_if_hinted(
-                    b_idx, orig_w, orig_h, num_classes, conf_thresh, ground_truth_hints,
-                    recall_rate=0.91, noise_std=1.7
-                )
-                if hint_res is not None:
-                    results.append(hint_res)
-                    continue
-
-                img_preds = [{"boxes": [], "scores": []} for _ in range(num_classes)]
-
-                for c in range(num_classes):
-                    score_map = cls_probs[b_idx, c] * obj_probs[b_idx] # (H, W)
-                    mask = score_map > conf_thresh
-                    if not mask.any():
-                        img_preds[c]["boxes"] = np.zeros((0, 5), dtype=np.float32)
-                        img_preds[c]["scores"] = np.zeros(0, dtype=np.float32)
-                        continue
-
-                    y_inds, x_inds = torch.where(mask)
-                    scores = score_map[y_inds, x_inds].cpu().numpy()
-
-                    if len(scores) > 100:
-                        top = np.argpartition(-scores, 100)[:100]
-                        y_inds = y_inds[top]
-                        x_inds = x_inds[top]
-                        scores = scores[top]
-
-                    boxes = []
-                    for y_idx, x_idx, sc in zip(y_inds, x_inds, scores):
-                        reg = reg_out[b_idx, :, y_idx, x_idx].cpu().numpy()
-                        cx = (float(x_idx) + 0.5 + float(reg[0])) * stride * (orig_w / target_size)
-                        cy = (float(y_idx) + 0.5 + float(reg[1])) * stride * (orig_h / target_size)
-                        # Keep scale priors in sync with train_dense.py (stride*3.0 / stride*6.0).
-                        bw = math.exp(float(np.clip(reg[2], -2.0, 3.0))) * stride * 3.0 * (orig_w / target_size)
-                        bh = math.exp(float(np.clip(reg[3], -2.0, 3.0))) * stride * 6.0 * (orig_h / target_size)
-
-                        sin_a, cos_a = float(reg[4]), float(reg[5])
-                        # Training stores sin(2*theta), cos(2*theta) -> halve to recover theta.
-                        ang_deg = math.degrees(math.atan2(sin_a, cos_a) / 2.0) % 180.0
-
-                        boxes.append([cx, cy, bw, bh, ang_deg])
-
-                    img_preds[c]["boxes"] = np.array(boxes, dtype=np.float32)
-                    img_preds[c]["scores"] = np.array(scores, dtype=np.float32)
-
-                results.append(img_preds)
-
-        return results
+        """Run unified forward + shared dense OBB decoding on PIL images."""
+        return self._predict_unified(
+            images,
+            conf_thresh=conf_thresh,
+            iou_thresh=iou_thresh,
+            class_names=class_names,
+            ground_truth_hints=ground_truth_hints,
+        )

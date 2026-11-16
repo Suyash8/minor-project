@@ -236,8 +236,9 @@ def train_yolo_obb(
             # weights_only=False (review A2): torch>=2.6 defaults to True and
             # Ultralytics checkpoints are NOT plain-tensor dicts, so the
             # default load fails and resume was silently disabled.
-            ckpt_obj = torch.load(str(last_pt), map_location="cpu",
-                                  weights_only=False)
+            from src.utils.security import safe_load_checkpoint
+            ckpt_obj = safe_load_checkpoint(str(last_pt), map_location="cpu",
+                                            allow_unsafe_legacy=True)
             completed_before = checkpoint_progress(ckpt_obj, save_dir)
             if completed_before >= epochs:
                 return {"model_name": model_name, "dataset_name": dataset_name, "run_dir": str(save_dir),
@@ -379,6 +380,18 @@ def train_yolo_obb(
                         shutil.copy2(f, snap)
                         _drive_mirror.submit(snap, dest_name=f.name,
                                              unlink_after=True)
+                from src.training.engine_common import write_bundle_manifest
+                bundle_path = write_bundle_manifest(
+                    save_dir,
+                    last_path=last_pt,
+                    last_epoch=epoch + 1,
+                    best_path=best_pt,
+                    selection_metric="mAP50-95",
+                    is_ema=False,
+                )
+                bundle_snap = _snap_dir / f"bundle_manifest_e{epoch}.json"
+                shutil.copy2(bundle_path, bundle_snap)
+                _drive_mirror.submit(bundle_snap, dest_name="bundle_manifest.json", unlink_after=True)
             except Exception as e:
                 print(f"[mirror][warn] snapshot failed: {e}")
 

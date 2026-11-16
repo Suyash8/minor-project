@@ -400,6 +400,17 @@ def extract_dataset_archive(archive_path: Path, dst_root: str, dataset: str) -> 
     extract_dest = dst_p if has_prefix else dst_ds
     extract_dest.mkdir(parents=True, exist_ok=True)
 
+    # F25: strictly inspect every archive member before extraction (blocks traversal & symlinks).
+    from src.utils.security import validate_tar_archive, validate_zip_archive
+    try:
+        if archive_str.endswith((".tar", ".tar.gz", ".tgz")):
+            validate_tar_archive(archive_path, extract_dest)
+        elif archive_str.endswith(".zip"):
+            validate_zip_archive(archive_path, extract_dest)
+    except Exception as e:
+        print(f"[stage][error] unsafe archive blocked ({archive_path.name}): {e}", file=sys.stderr)
+        return False
+
     print(f"[stage] fast-unpacking archive {archive_path.name} -> {extract_dest}...",
           flush=True)
     t0 = time.time()
@@ -417,7 +428,10 @@ def extract_dataset_archive(archive_path: Path, dst_root: str, dataset: str) -> 
         if not success:
             try:
                 with tarfile.open(archive_path, "r:*") as tf:
-                    tf.extractall(extract_dest)
+                    try:
+                        tf.extractall(extract_dest, filter="data")
+                    except TypeError:
+                        tf.extractall(extract_dest)
                 success = True
             except Exception as e:
                 print(f"[stage][error] tar extraction failed ({archive_path.name}): {e}",

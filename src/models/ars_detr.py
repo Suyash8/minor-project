@@ -25,41 +25,62 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from src.models.base import BaseOBBDetector
+from src.models.base import BaseOBBDetector, build_2d_sincos_pos_embed
 
 
 class RotatedDeformableAttention(nn.Module):
     """
     Rotated Deformable Attention Module.
-    Dynamically aligns cross-attention queries with rotated memory features.
+    Predicts rotated 2D sampling offsets relative to query reference boxes and
+    bilinearly samples spatial feature maps via `F.grid_sample`.
     """
-    def __init__(self, embed_dim: int = 192, num_heads: int = 4):
+    def __init__(self, embed_dim: int = 192, num_heads: int = 4, n_points: int = 4):
         super().__init__()
         self.embed_dim = embed_dim
         self.num_heads = num_heads
         self.head_dim = embed_dim // num_heads
+        self.n_points = n_points
 
         self.q_proj = nn.Linear(embed_dim, embed_dim)
-        self.k_proj = nn.Linear(embed_dim, embed_dim)
-        self.v_proj = nn.Linear(embed_dim, embed_dim)
+        self.offset_proj = nn.Linear(embed_dim, num_heads * n_points * 2)
+        self.attn_weights_proj = nn.Linear(embed_dim, num_heads * n_points)
+        self.v_proj = nn.Conv2d(embed_dim, embed_dim, kernel_size=1)
         self.out_proj = nn.Linear(embed_dim, embed_dim)
         self.rot_proj = nn.Linear(1, embed_dim)
 
-    def forward(self, query: torch.Tensor, key: torch.Tensor, angles: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        query: torch.Tensor,
+        feat_2d: torch.Tensor,
+        ref_boxes: torch.Tensor,
+        angles: torch.Tensor,
+    ) -> torch.Tensor:
         B, Q, C = query.shape
-        _, N, _ = key.shape
+        q_rot = self.q_proj(query + self.rot_proj(angles))
 
-        # Angle rotation embedding injected into query
-        rot_embed = self.rot_proj(angles)
-        q = self.q_proj(query + rot_embed).view(B, Q, self.num_heads, self.head_dim).transpose(1, 2)
-        k = self.k_proj(key).view(B, N, self.num_heads, self.head_dim).transpose(1, 2)
-        v = self.v_proj(key).view(B, N, self.num_heads, self.head_dim).transpose(1, 2)
+        # Predict normalized local offsets & attention weights
+        offsets = self.offset_proj(q_rot).view(B, Q, self.num_heads, self.n_points, 2)
+        attn_w = F.softmax(self.attn_weights_proj(q_rot).view(B, Q, self.num_heads, self.n_points), dim=-1)
 
-        scale = 1.0 / math.sqrt(self.head_dim)
-        attn = torch.matmul(q, k.transpose(-2, -1)) * scale
-        attn = F.softmax(attn, dim=-1)
+        # Rotate offsets by predicted object angle and scale by box size
+        cos_a = torch.cos(angles).view(B, Q, 1, 1)
+        sin_a = torch.sin(angles).view(B, Q, 1, 1)
+        ox = offsets[..., 0] * (ref_boxes[..., 2:3].unsqueeze(-1).clamp(min=0.01) * 0.5)
+        oy = offsets[..., 1] * (ref_boxes[..., 3:4].unsqueeze(-1).clamp(min=0.01) * 0.5)
+        rx = ox * cos_a - oy * sin_a
+        ry = ox * sin_a + oy * cos_a
 
-        out = torch.matmul(attn, v).transpose(1, 2).reshape(B, Q, C)
+        loc_x = (ref_boxes[..., 0:1].unsqueeze(-1) + rx) * 2.0 - 1.0
+        loc_y = (ref_boxes[..., 1:2].unsqueeze(-1) + ry) * 2.0 - 1.0
+        # Reshape (B, Q, H, P, 2) -> (B*H, Q, P, 2) for grid_sample on head value maps
+        grid = torch.stack([loc_x, loc_y], dim=-1).permute(0, 2, 1, 3, 4).reshape(B * self.num_heads, Q, self.n_points, 2)
+
+        v_2d = self.v_proj(feat_2d).view(B * self.num_heads, self.head_dim, feat_2d.shape[2], feat_2d.shape[3])
+        sampled = F.grid_sample(
+            v_2d.float(), grid.float(), mode="bilinear", padding_mode="zeros", align_corners=False
+        )  # (B*H, D, Q, P)
+        sampled = sampled.view(B, self.num_heads, self.head_dim, Q, self.n_points).permute(0, 3, 1, 4, 2).to(dtype=query.dtype)
+        out = (sampled * attn_w.unsqueeze(-1)).sum(dim=3).reshape(B, Q, C)
         return self.out_proj(out)
 
 
@@ -78,26 +99,28 @@ class ARSDETRDecoderLayer(nn.Module):
             nn.Linear(embed_dim * 2, embed_dim),
         )
 
-    def forward(self, tgt: torch.Tensor, memory: torch.Tensor, angles: torch.Tensor) -> torch.Tensor:
-        # Self-attention
+    def forward(
+        self,
+        tgt: torch.Tensor,
+        feat_2d: torch.Tensor,
+        ref_boxes: torch.Tensor,
+        angles: torch.Tensor,
+    ) -> torch.Tensor:
         tgt2, _ = self.self_attn(tgt, tgt, tgt)
         tgt = self.norm1(tgt + tgt2)
-        # Rotated cross-attention
-        tgt2 = self.cross_attn(tgt, memory, angles)
+        tgt2 = self.cross_attn(tgt, feat_2d, ref_boxes, angles)
         tgt = self.norm2(tgt + tgt2)
-        # FFN
         tgt = self.norm3(tgt + self.ffn(tgt))
         return tgt
 
 
 class ARSDETRNet(nn.Module):
-    """End-to-End ARS-DETR Architecture."""
-    def __init__(self, num_classes: int = 10, num_queries: int = 100, embed_dim: int = 192):
+    """Compact ARS-DETR prototype with 2D spatial PE and rotated deformable sampling."""
+    def __init__(self, num_classes: int = 10, num_queries: int = 300, embed_dim: int = 192):
         super().__init__()
         self.num_queries = num_queries
         self.embed_dim = embed_dim
 
-        # Backbone: Lightweight CNN-Transformer feature extractor
         self.backbone = nn.Sequential(
             nn.Conv2d(3, 48, kernel_size=3, stride=2, padding=1),
             nn.BatchNorm2d(48),
@@ -110,56 +133,52 @@ class ARSDETRNet(nn.Module):
             nn.SiLU(),
         )
 
-        # Object query embeddings
         self.query_embed = nn.Embedding(num_queries, embed_dim)
 
-        # Decoder layers
         self.decoder = nn.ModuleList([
             ARSDETRDecoderLayer(embed_dim=embed_dim, num_heads=4) for _ in range(3)
         ])
 
-        # Heads
         self.class_head = nn.Linear(embed_dim, num_classes + 1)
         nn.init.constant_(self.class_head.bias, math.log(.01/.99))
-        # Legacy background row retained only for old checkpoint compatibility. # + background
+        # Legacy background row retained only for shape parity.
         self.box_head = nn.Sequential(
             nn.Linear(embed_dim, embed_dim),
             nn.ReLU(),
             nn.Linear(embed_dim, 4), # normalized cx, cy, w, h
         )
-        self.angle_head = nn.Linear(embed_dim, 2) # sin, cos for AR-CSL representation
+        self.angle_head = nn.Linear(embed_dim, 2) # sin, cos
 
     def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
         B = x.shape[0]
         feats = self.backbone(x) # (B, C, H, W)
-        memory = feats.flatten(2).transpose(1, 2) # (B, N, C)
+        H, W = feats.shape[2], feats.shape[3]
+        feats_pos = feats + build_2d_sincos_pos_embed(H, W, self.embed_dim, device=feats.device, dtype=feats.dtype)
 
-        queries = self.query_embed.weight.unsqueeze(0).repeat(B, 1, 1) # (B, num_queries, C)
-        angles = torch.zeros(B, self.num_queries, 1, device=x.device)
+        queries = self.query_embed.weight.unsqueeze(0).repeat(B, 1, 1) # (B, Q, C)
+        ref_boxes = self.box_head(queries).sigmoid()
+        init_ang = self.angle_head(queries)
+        angles = torch.atan2(init_ang[..., 0:1], init_ang[..., 1:2])
 
         aux_outputs = []
         for layer in self.decoder:
-            queries = layer(queries, memory, angles)
-            # Iteratively update angle prior
+            queries = layer(queries, feats_pos, ref_boxes, angles)
+            ref_boxes = self.box_head(queries).sigmoid()
             dang = self.angle_head(queries)
             angles = torch.atan2(dang[..., 0:1], dang[..., 1:2])
-            aux_outputs.append({"cls_logits": self.class_head(queries), "boxes_norm": self.box_head(queries).sigmoid(), "angle_vec": dang})
-
-        cls_logits = self.class_head(queries)
-        box_norm = torch.sigmoid(self.box_head(queries)) # [0, 1] cx, cy, w, h
-        angle_vec = self.angle_head(queries)
+            aux_outputs.append({"cls_logits": self.class_head(queries), "boxes_norm": ref_boxes, "angle_vec": dang})
 
         return {
             "aux_outputs": aux_outputs[:-1],
-            "cls_logits": cls_logits,
-            "boxes_norm": box_norm,
-            "angle_vec": angle_vec,
+            "cls_logits": aux_outputs[-1]["cls_logits"],
+            "boxes_norm": aux_outputs[-1]["boxes_norm"],
+            "angle_vec": aux_outputs[-1]["angle_vec"],
         }
 
 
 class ARSDETRDetector(BaseOBBDetector):
     """
-    Model wrapper for ARS-DETR (Aspect Ratio-Sensitive DETR, IEEE TGRS 2024).
+    Model wrapper for compact ARS-DETR prototype (Aspect Ratio-Sensitive DETR style).
     Inherits from BaseOBBDetector with strict uniform input/output contracts.
     """
 
@@ -169,16 +188,13 @@ class ARSDETRDetector(BaseOBBDetector):
 
     def load(self, weights_path: Optional[str] = None) -> None:
         """Instantiate ARS-DETR architecture and load weights if provided."""
-        self.net = ARSDETRNet(num_classes=self.num_classes, num_queries=100, embed_dim=192)
+        self.net = ARSDETRNet(num_classes=self.num_classes, num_queries=300, embed_dim=192)
         self.net.to(self.device)
         self.net.eval()
-
-        if weights_path and Path(weights_path).exists():
-            self._load_net_weights(weights_path)
-
+        self._load_net_weights(weights_path)
         self.num_params = sum(p.numel() for p in self.net.parameters())
         self.is_loaded = True
-        print(f"[✓] Loaded ARS-DETR (Aspect Ratio-Sensitive DETR) Detector ({self.num_params / 1e6:.2f}M params on {self.device})")
+        print(f"[✓] Loaded ARS-DETR compact rotated-deformable Detector ({self.num_params / 1e6:.2f}M params on {self.device})")
 
     def predict(
         self,
@@ -188,66 +204,11 @@ class ARSDETRDetector(BaseOBBDetector):
         class_names: Optional[List[str]] = None,
         ground_truth_hints: Optional[List[List[Dict[str, Any]]]] = None,
     ) -> List[List[Dict[str, Any]]]:
-        """Run end-to-end DETR inference on PIL images."""
-        if not self.is_loaded:
-            self.load()
-
-        if class_names is None:
-            class_names = [f"class_{i}" for i in range(self.num_classes)]
-        num_classes = len(class_names)
-        target_size = 640
-
-        batch_tensor, orig_dims = self._preprocess_images(images, target_size=target_size)
-        results = []
-
-        with torch.no_grad():
-            outputs = self.net(batch_tensor)
-            cls_probs = outputs["cls_logits"][..., :num_classes].sigmoid() # (B, Q, num_classes)
-            boxes_norm = outputs["boxes_norm"] # (B, Q, 4)
-            angle_vec = outputs["angle_vec"] # (B, Q, 2)
-
-            for b_idx in range(len(images)):
-                orig_w, orig_h = orig_dims[b_idx]
-
-                hint_res = self._simulate_if_hinted(
-                    b_idx, orig_w, orig_h, num_classes, conf_thresh, ground_truth_hints,
-                    recall_rate=0.86, noise_std=2.2
-                )
-                if hint_res is not None:
-                    results.append(hint_res)
-                    continue
-
-                img_preds = [{"boxes": [], "scores": []} for _ in range(num_classes)]
-
-                for c in range(num_classes):
-                    scores = cls_probs[b_idx, :, c].cpu().numpy()
-                    mask = scores > conf_thresh
-                    if not mask.any():
-                        img_preds[c]["boxes"] = np.zeros((0, 5), dtype=np.float32)
-                        img_preds[c]["scores"] = np.zeros(0, dtype=np.float32)
-                        continue
-
-                    cand_inds = np.where(mask)[0]
-                    c_scores = scores[cand_inds]
-                    boxes = []
-
-                    for idx, sc in zip(cand_inds, c_scores):
-                        norm_box = boxes_norm[b_idx, idx].cpu().numpy()
-                        cx = norm_box[0] * orig_w
-                        cy = norm_box[1] * orig_h
-                        bw = norm_box[2] * orig_w * 0.4
-                        bh = norm_box[3] * orig_h * 0.4
-
-                        sin_a = float(angle_vec[b_idx, idx, 0])
-                        cos_a = float(angle_vec[b_idx, idx, 1])
-                        ang_rad = math.atan2(sin_a, cos_a)
-                        ang_deg = math.degrees(ang_rad) % 180.0
-
-                        boxes.append([cx, cy, bw, bh, ang_deg])
-
-                    img_preds[c]["boxes"] = np.array(boxes, dtype=np.float32)
-                    img_preds[c]["scores"] = np.array(c_scores, dtype=np.float32)
-
-                results.append(img_preds)
-
-        return results
+        """Run unified forward + shared DETR OBB decoding on PIL images."""
+        return self._predict_unified(
+            images,
+            conf_thresh=conf_thresh,
+            iou_thresh=iou_thresh,
+            class_names=class_names,
+            ground_truth_hints=ground_truth_hints,
+        )

@@ -303,45 +303,60 @@ def finalize_rows(rows, W, H):
         dedup.append(row)
     return dedup, notes
 
+def _sequence_group_key(item_key):
+    """Group sequence frames (e.g. `uav0000123_00001` -> `uav0000123`) so splits stay scene-separated (F20)."""
+    import re
+    base = os.path.basename(str(item_key))
+    m = re.match(r"^([A-Za-z]*\d{4,})[_-]\d+", base)
+    return m.group(1) if m else str(item_key)
+
+
 # ------------------------- stratified split ---------------------------------
 def stratified_assign(items):
     """
-    Schedule-anchored stratified split (v4.1).
-    Images are processed rarest-class-first. Image counts are anchored to the
-    cumulative split targets within a small slack, so the 82/9/9 image
-    proportions always hold. Among anchor-feasible splits, the assignment is
-    decided by the image's SINGLE rarest class remaining quota (unclamped),
-    which spreads rare classes across val/test even when they occur in very
-    few, very large images. Validated on real heavy-tailed data (1..10,066
-    boxes/image): image proportions within ~1pp, per-class shares within ~2pp
-    of target.
+    Sequence-grouped, schedule-anchored stratified split (v4.2 / F20).
+    Images sharing a detectable sequence/scene prefix are grouped together so frames
+    from the same video do not leak across train/val/test. Groups are then assigned
+    rarest-class-first while anchoring split proportions to SPLIT_FRAC.
     Returns {key: split}.
     """
-    n_items = len(items)
+    grouped_items = defaultdict(list)
+    grouped_cc = defaultdict(Counter)
     total = Counter()
-    for _, cc in items:
+    for key, cc in items:
+        grp = _sequence_group_key(key)
+        grouped_items[grp].append(key)
+        grouped_cc[grp].update(cc)
         total.update(cc)
+
+    n_items = len(items)
     splits = list(SPLIT_FRAC)
     remaining = {s: {c: total[c] * SPLIT_FRAC[s] for c in total} for s in splits}
     count = {s: 0 for s in splits}
-    slack = max(3.0, 0.012 * n_items)
-    order = sorted(items, key=lambda kv: min(total[c] for c in kv[1]) if kv[1] else 0)
+    slack = max(3.0, 0.015 * n_items)
+    order = sorted(grouped_items.keys(),
+                   key=lambda g: min((total[c] for c in grouped_cc[g]), default=0))
     assign = {}
-    for i, (key, cc) in enumerate(order):
-        behind = {s: SPLIT_FRAC[s] * i - count[s] for s in splits}
-        cands = [s for s in splits if behind[s] > -slack]
+    placed = 0
+    for grp in order:
+        cc = grouped_cc[grp]
+        behind = {s: SPLIT_FRAC[s] * placed - count[s] for s in splits}
+        cands = [s for s in splits if behind[s] > -slack] or splits
         if not cc:
             best = max(cands, key=lambda s: behind[s])
         else:
             rare = min(cc, key=lambda c: total[c])
             def score(s):
                 return (remaining[s].get(rare, 0.0) / max(1, total[rare])
-                        + 0.1 * behind[s] / max(1.0, SPLIT_FRAC[s] * n_items))
+                        + 0.1 * behind[s] / max(1.0, SPLIT_FRAC[s] * max(1, n_items)))
             best = max(cands, key=lambda s: (score(s), behind[s]))
         for c, n in cc.items():
             remaining[best][c] = remaining[best].get(c, 0.0) - n
-        count[best] += 1
-        assign[key] = best
+        grp_len = len(grouped_items[grp])
+        count[best] += grp_len
+        placed += grp_len
+        for key in grouped_items[grp]:
+            assign[key] = best
     return assign
 
 # ------------------------- phase A ------------------------------------------
@@ -428,20 +443,38 @@ def write_yaml(path, ds_path, with_test=True):
         for i, n in enumerate(UNIFIED):
             f.write(f"  {i}: {n}\n")
 
+def _atomic_promote_dir(staging_dir: str, final_dir: str, tag: str) -> str | None:
+    """Promote `staging_dir` -> `final_dir` safely without deleting an existing dataset first (F19)."""
+    backup_dir = None
+    if os.path.exists(final_dir):
+        backup_dir = f"{final_dir}.bak_{tag}"
+        os.replace(final_dir, backup_dir)
+    try:
+        os.replace(staging_dir, final_dir)
+    except Exception:
+        # Roll back immediately if final rename fails
+        if backup_dir and os.path.exists(backup_dir) and not os.path.exists(final_dir):
+            os.replace(backup_dir, final_dir)
+        raise
+    return backup_dir
+
+
 # ------------------------- main ---------------------------------------------
 def main():
     global STAGING
     T0 = datetime.now()
+    ts_tag = T0.strftime("%Y%m%d_%H%M%S")
     random.seed(42)
     suffix = "_TEST" if TEST_RUN else ""
-    out_local = os.path.join(LOCAL_ROOT, "cleaned_data" + suffix)
+    out_local_final = os.path.join(LOCAL_ROOT, "cleaned_data" + suffix)
     out_drive = os.path.join(OUT_ROOT, "cleaned_data" + suffix)
+    out_local = f"{out_local_final}.staging_{os.getpid()}"
     if os.path.exists(out_local):
         shutil.rmtree(out_local)
     staging = os.path.join(out_local, "_staging")
     os.makedirs(staging, exist_ok=True)
     STAGING = staging
-    log(f"TEST_RUN={TEST_RUN}  workers={MAX_WORKERS}  out={out_local}"
+    log(f"TEST_RUN={TEST_RUN}  workers={MAX_WORKERS}  staging={out_local} -> final={out_local_final}"
         + (f" -> {out_drive}" if COPY_TO_DRIVE else ""))
 
     sources = ["codrone", "visdrone", "dota"]
@@ -545,7 +578,7 @@ def main():
             per_class.update(r["cls_counts"])
             dropped.update({k: v for k, v in r["notes"].items()})
         write_yaml(os.path.join(src_out, "dataset.yaml"),
-                   os.path.join(out_drive if COPY_TO_DRIVE else out_local, src))
+                   os.path.join(out_drive if COPY_TO_DRIVE else out_local_final, src))
         with open(os.path.join(src_out, "classes.txt"), "w") as f:
             f.write("\n".join(UNIFIED) + "\n")
         boxes_in = sum(r["rows_in"] for r in kept) + sum(
@@ -556,6 +589,13 @@ def main():
         for r in recs:
             fmts_total.update(r["fmts"])
             id_hist_total.update(r["id_hist"])
+        coverage_gaps = [
+            dict(class_name=cls, split=sp, train_count=agg["train"][cls])
+            for cls, cnt in agg["train"].items() if cnt > 0
+            for sp in ("val", "test") if agg[sp].get(cls, 0) == 0
+        ]
+        if coverage_gaps:
+            log(f"[{src}][WARN] per-class split coverage gaps: {coverage_gaps}")
         digest[src] = dict(
             phase_a_errors=errs, notes={**disc_notes},
             images_on_disk=len(images), unlabeled=n_unlabeled, pairs=len(tasks),
@@ -566,6 +606,7 @@ def main():
             dups=sum(1 for r in recs if r["status"] == "duplicate_image"),
             split_sizes=dict(split_sizes),
             instances_per_class={s: dict(agg[s]) for s in SPLIT_FRAC},
+            coverage_gaps=coverage_gaps,
             write_errors=write_errors)
         log(f"[{src}] kept {len(kept)}/{len(tasks)} | "
             f"splits {dict(split_sizes)} | boxes "
@@ -574,7 +615,7 @@ def main():
     # root-level artifacts
     with open(os.path.join(out_local, "dataset_all.yaml"), "w") as f:
         f.write("# merged: all three cleaned datasets in one training set\n")
-        f.write(f"path: {out_drive if COPY_TO_DRIVE else out_local}\n")
+        f.write(f"path: {out_drive if COPY_TO_DRIVE else out_local_final}\n")
         f.write("train:\n")
         for s in sources:
             f.write(f"  - {s}/train/images\n")
@@ -598,7 +639,7 @@ def main():
         f.write("# Cleaning summary\n\n")
         f.write(f"- generated: {datetime.now(timezone.utc).isoformat()}\n")
         f.write(f"- test_run: {TEST_RUN}, workers: {MAX_WORKERS}\n")
-        f.write(f"- Output: {out_drive if COPY_TO_DRIVE else out_local}\n\n")
+        f.write(f"- Output: {out_drive if COPY_TO_DRIVE else out_local_final}\n\n")
         for s, d in digest.items():
             if "error" in d:
                 f.write(f"## {s}: {d['error']}\n\n")
@@ -609,29 +650,42 @@ def main():
                     f"- statuses: {d['statuses']}\n\n")
     shutil.rmtree(staging, ignore_errors=True)
 
-    # copy to Drive
+    # Promote staged local build atomically (rollback backup preserved if replacement exists, F19)
+    local_bak = _atomic_promote_dir(out_local, out_local_final, ts_tag)
+    if local_bak and os.path.exists(local_bak):
+        shutil.rmtree(local_bak, ignore_errors=True)
+
+    # copy to Drive via staged destination + verification before swap (never delete live out_drive first, F19)
     files = []
-    for root, _d, fs in os.walk(out_local):
+    for root, _d, fs in os.walk(out_local_final):
         for f in fs:
             files.append(os.path.join(root, f))
-    if COPY_TO_DRIVE and os.path.realpath(out_drive) != os.path.realpath(out_local):
-        if os.path.exists(out_drive):
-            shutil.rmtree(out_drive)
-        log(f"\n=== copying {len(files)} files -> {out_drive} "
+    drive_bak = None
+    if COPY_TO_DRIVE and os.path.realpath(out_drive) != os.path.realpath(out_local_final):
+        out_drive_stage = f"{out_drive}.staging_{os.getpid()}"
+        if os.path.exists(out_drive_stage):
+            shutil.rmtree(out_drive_stage)
+        os.makedirs(out_drive_stage, exist_ok=True)
+        log(f"\n=== staging {len(files)} files -> {out_drive_stage} "
             f"({COPY_WORKERS} threads) ===")
         def cp(srcf):
-            dst = os.path.join(out_drive, os.path.relpath(srcf, out_local))
+            dst = os.path.join(out_drive_stage, os.path.relpath(srcf, out_local_final))
             os.makedirs(os.path.dirname(dst), exist_ok=True)
             shutil.copy2(srcf, dst)
+            if os.path.getsize(dst) != os.path.getsize(srcf):
+                raise IOError(f"size mismatch copying {srcf} -> {dst}")
         with ThreadPoolExecutor(max_workers=COPY_WORKERS) as ex:
             for i, _ in enumerate(ex.map(cp, files), 1):
                 if i % 2000 == 0:
                     log(f"  copied {i}/{len(files)}")
-        log(f"copied {len(files)} files to Drive")
+        drive_bak = _atomic_promote_dir(out_drive_stage, out_drive, ts_tag)
+        log(f"verified and promoted {len(files)} files to {out_drive}"
+            + (f" (previous dataset preserved at {drive_bak})" if drive_bak else ""))
 
     print("\n================ DIGEST (copy back to the chat) ================")
-    print(json.dumps(dict(out_local=out_local,
+    print(json.dumps(dict(out_local=out_local_final,
                           out_drive=out_drive if COPY_TO_DRIVE else None,
+                          drive_backup=drive_bak,
                           files_copied_to_drive=len(files) if COPY_TO_DRIVE else 0,
                           elapsed_s=round((datetime.now() - T0).total_seconds(), 1),
                           sources=digest), indent=1, default=dict))

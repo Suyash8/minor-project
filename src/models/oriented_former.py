@@ -26,11 +26,22 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from src.models.base import BaseOBBDetector
+from src.models.base import (
+    BaseOBBDetector,
+    build_2d_sincos_pos_embed,
+    sample_rotated_roi_features,
+)
+
+
+def _decode_raw_gaussian_boxes(raw_b: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Decode unconstrained raw box params -> normalized (cx, cy, w, h) in (0, 1) and angle_rad."""
+    cx_cy = torch.sigmoid(raw_b[..., 0:2])
+    wh = 0.001 + 0.999 * torch.sigmoid(raw_b[..., 2:4] - 2.5)
+    return torch.cat([cx_cy, wh], dim=-1), raw_b[..., 4:5]
 
 
 class GaussianPositionalEncoding(nn.Module):
-    """Encodes 2D Gaussian parameters (mu_x, mu_y, sigma_x, sigma_y, theta) into query embeddings."""
+    """Encodes 2D Gaussian parameters (mu_x, mu_y, w, h, theta) into query embeddings."""
     def __init__(self, embed_dim: int = 192):
         super().__init__()
         self.proj = nn.Sequential(
@@ -44,32 +55,65 @@ class GaussianPositionalEncoding(nn.Module):
 
 
 class WassersteinSelfAttention(nn.Module):
-    """Self-attention guided by Gaussian Wasserstein distance affinity matrices."""
+    """Self-attention biased by pairwise 2D Gaussian Wasserstein-2 distances between query priors."""
     def __init__(self, embed_dim: int = 192, num_heads: int = 4):
         super().__init__()
+        self.num_heads = num_heads
         self.attn = nn.MultiheadAttention(embed_dim, num_heads=num_heads, batch_first=True)
+        self.w_scale = nn.Parameter(torch.ones(num_heads))
         self.norm = nn.LayerNorm(embed_dim)
 
-    def forward(self, queries: torch.Tensor) -> torch.Tensor:
-        out, _ = self.attn(queries, queries, queries)
+    def forward(self, queries: torch.Tensor, raw_gaussians: torch.Tensor) -> torch.Tensor:
+        B, Q, _ = queries.shape
+        boxes_norm, ang = _decode_raw_gaussian_boxes(raw_gaussians)
+        centers = boxes_norm[..., 0:2]  # (B, Q, 2)
+        cos_a = torch.cos(ang[..., 0])
+        sin_a = torch.sin(ang[..., 0])
+        sx = (boxes_norm[..., 2] * 0.5).square()
+        sy = (boxes_norm[..., 3] * 0.5).square()
+        # 2x2 rotated covariance Sigma^(1/2) elements (sym: [a, b; b, c])
+        s_xx = sx * cos_a.square() + sy * sin_a.square()
+        s_yy = sx * sin_a.square() + sy * cos_a.square()
+        s_xy = (sx - sy) * sin_a * cos_a
+
+        dc = centers.unsqueeze(2) - centers.unsqueeze(1)  # (B, Q, Q, 2)
+        center_dist2 = dc.square().sum(dim=-1)
+        cov_diff2 = (
+            (s_xx.unsqueeze(2) - s_xx.unsqueeze(1)).square()
+            + (s_yy.unsqueeze(2) - s_yy.unsqueeze(1)).square()
+            + 2.0 * (s_xy.unsqueeze(2) - s_xy.unsqueeze(1)).square()
+        )
+        w2_dist = torch.sqrt((center_dist2 + cov_diff2).clamp(min=1e-6))  # (B, Q, Q)
+        bias = -self.w_scale.view(1, self.num_heads, 1, 1) * w2_dist.unsqueeze(1)  # (B, H, Q, Q)
+        attn_mask = bias.reshape(B * self.num_heads, Q, Q)
+        out, _ = self.attn(queries, queries, queries, attn_mask=attn_mask, need_weights=False)
         return self.norm(queries + out)
 
 
 class OrientedCrossAttention(nn.Module):
-    """Cross-attention aligning memory values along oriented principal axes."""
+    """Cross-attention combining oriented rotated feature sampling with 2D spatial memory attention."""
     def __init__(self, embed_dim: int = 192, num_heads: int = 4):
         super().__init__()
         self.cross_attn = nn.MultiheadAttention(embed_dim, num_heads=num_heads, batch_first=True)
+        self.roi_proj = nn.Linear(embed_dim, embed_dim)
         self.norm = nn.LayerNorm(embed_dim)
 
-    def forward(self, query: torch.Tensor, memory: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        query: torch.Tensor,
+        memory: torch.Tensor,
+        feat_2d: torch.Tensor,
+        raw_gaussians: torch.Tensor,
+    ) -> torch.Tensor:
         out, _ = self.cross_attn(query, memory, memory)
-        return self.norm(query + out)
+        boxes_norm, ang = _decode_raw_gaussian_boxes(raw_gaussians)
+        roi_feat = sample_rotated_roi_features(feat_2d, boxes_norm, ang, grid_k=3)
+        return self.norm(query + out + self.roi_proj(roi_feat))
 
 
 class OrientedFormerNet(nn.Module):
-    """End-to-End OrientedFormer Architecture."""
-    def __init__(self, num_classes: int = 10, num_queries: int = 100, embed_dim: int = 192):
+    """Compact OrientedFormer prototype with GPE, Wasserstein self-attention, and oriented cross-attention."""
+    def __init__(self, num_classes: int = 10, num_queries: int = 300, embed_dim: int = 192):
         super().__init__()
         self.num_queries = num_queries
         self.embed_dim = embed_dim
@@ -86,8 +130,12 @@ class OrientedFormerNet(nn.Module):
             nn.SiLU(),
         )
 
-        # Gaussian query priors: (cx, cy, w, h, theta)
-        self.init_gaussian_queries = nn.Parameter(torch.rand(num_queries, 5))
+        # Spread Gaussian query priors across image in raw logit coords
+        init_g = torch.zeros(num_queries, 5)
+        init_g[:, 0:2].uniform_(-2.0, 2.0)
+        init_g[:, 2:4].uniform_(-1.5, 0.5)
+        init_g[:, 4].uniform_(-math.pi / 2.0, math.pi / 2.0)
+        self.init_gaussian_queries = nn.Parameter(init_g)
         self.gpe = GaussianPositionalEncoding(embed_dim=embed_dim)
 
         self.wsa = WassersteinSelfAttention(embed_dim=embed_dim, num_heads=4)
@@ -95,23 +143,26 @@ class OrientedFormerNet(nn.Module):
 
         self.cls_head = nn.Linear(embed_dim, num_classes + 1)
         nn.init.constant_(self.cls_head.bias, math.log(.01/.99))
-        # Legacy background row retained only for old checkpoint compatibility.
-        self.gaussian_reg_head = nn.Linear(embed_dim, 5) # updates to (cx, cy, log(w), log(h), theta_rad)
+        # Legacy background row retained only for shape parity.
+        self.gaussian_reg_head = nn.Linear(embed_dim, 5)
 
     def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
         B = x.shape[0]
-        feats = self.backbone(x).flatten(2).transpose(1, 2) # (B, N, embed_dim)
+        feats = self.backbone(x)
+        H, W = feats.shape[2], feats.shape[3]
+        feats_pos = feats + build_2d_sincos_pos_embed(H, W, self.embed_dim, device=feats.device, dtype=feats.dtype)
+        memory = feats_pos.flatten(2).transpose(1, 2) # (B, N, embed_dim)
 
         g_priors = self.init_gaussian_queries.unsqueeze(0).repeat(B, 1, 1) # (B, Q, 5)
         q_pos = self.gpe(g_priors)
 
-        queries = self.wsa(q_pos)
-        aux = {"cls_logits": self.cls_head(queries), "boxes": g_priors+self.gaussian_reg_head(queries)}
-        queries = self.oca(queries, feats)
+        queries = self.wsa(q_pos, g_priors)
+        aux_boxes = g_priors + self.gaussian_reg_head(queries)
+        aux = {"cls_logits": self.cls_head(queries), "boxes": aux_boxes}
+        queries = self.oca(queries, memory, feats_pos, aux_boxes)
 
         cls_logits = self.cls_head(queries)
-        delta_g = self.gaussian_reg_head(queries)
-        final_boxes = g_priors + delta_g
+        final_boxes = aux_boxes + self.gaussian_reg_head(queries)
 
         return {
             "aux_outputs": [aux],
@@ -122,7 +173,7 @@ class OrientedFormerNet(nn.Module):
 
 class OrientedFormerDetector(BaseOBBDetector):
     """
-    Model wrapper for OrientedFormer (IEEE TGRS 2024).
+    Model wrapper for compact OrientedFormer prototype (IEEE TGRS 2024 style).
     Inherits from BaseOBBDetector with strict uniform input/output contracts.
     """
 
@@ -132,16 +183,13 @@ class OrientedFormerDetector(BaseOBBDetector):
 
     def load(self, weights_path: Optional[str] = None) -> None:
         """Instantiate OrientedFormer architecture and load weights if provided."""
-        self.net = OrientedFormerNet(num_classes=self.num_classes, num_queries=100, embed_dim=192)
+        self.net = OrientedFormerNet(num_classes=self.num_classes, num_queries=300, embed_dim=192)
         self.net.to(self.device)
         self.net.eval()
-
-        if weights_path and Path(weights_path).exists():
-            self._load_net_weights(weights_path)
-
+        self._load_net_weights(weights_path)
         self.num_params = sum(p.numel() for p in self.net.parameters())
         self.is_loaded = True
-        print(f"[✓] Loaded OrientedFormer (Gaussian-Guided Transformer) Detector ({self.num_params / 1e6:.2f}M params on {self.device})")
+        print(f"[✓] Loaded OrientedFormer compact Gaussian-Guided Detector ({self.num_params / 1e6:.2f}M params on {self.device})")
 
     def predict(
         self,
@@ -151,61 +199,11 @@ class OrientedFormerDetector(BaseOBBDetector):
         class_names: Optional[List[str]] = None,
         ground_truth_hints: Optional[List[List[Dict[str, Any]]]] = None,
     ) -> List[List[Dict[str, Any]]]:
-        """Run OrientedFormer inference on PIL images."""
-        if not self.is_loaded:
-            self.load()
-
-        if class_names is None:
-            class_names = [f"class_{i}" for i in range(self.num_classes)]
-        num_classes = len(class_names)
-        target_size = 640
-
-        batch_tensor, orig_dims = self._preprocess_images(images, target_size=target_size)
-        results = []
-
-        with torch.no_grad():
-            outputs = self.net(batch_tensor)
-            cls_probs = outputs["cls_logits"][..., :num_classes].sigmoid() # (B, Q, num_classes)
-            boxes_out = outputs["boxes"] # (B, Q, 5)
-
-            for b_idx in range(len(images)):
-                orig_w, orig_h = orig_dims[b_idx]
-
-                hint_res = self._simulate_if_hinted(
-                    b_idx, orig_w, orig_h, num_classes, conf_thresh, ground_truth_hints,
-                    recall_rate=0.87, noise_std=2.0
-                )
-                if hint_res is not None:
-                    results.append(hint_res)
-                    continue
-
-                img_preds = [{"boxes": [], "scores": []} for _ in range(num_classes)]
-
-                for c in range(num_classes):
-                    scores = cls_probs[b_idx, :, c].cpu().numpy()
-                    mask = scores > conf_thresh
-                    if not mask.any():
-                        img_preds[c]["boxes"] = np.zeros((0, 5), dtype=np.float32)
-                        img_preds[c]["scores"] = np.zeros(0, dtype=np.float32)
-                        continue
-
-                    cand_inds = np.where(mask)[0]
-                    c_scores = scores[cand_inds]
-                    boxes = []
-
-                    for idx, sc in zip(cand_inds, c_scores):
-                        b = boxes_out[b_idx, idx].cpu().numpy()
-                        cx = float(np.clip(b[0], 0.0, 1.0)) * orig_w
-                        cy = float(np.clip(b[1], 0.0, 1.0)) * orig_h
-                        bw = float(np.clip(math.exp(float(np.clip(b[2], -2.0, 2.0))), 0.05, 0.5)) * orig_w
-                        bh = float(np.clip(math.exp(float(np.clip(b[3], -2.0, 2.0))), 0.05, 0.5)) * orig_h
-                        ang_deg = math.degrees(float(b[4])) % 180.0
-
-                        boxes.append([cx, cy, bw, bh, ang_deg])
-
-                    img_preds[c]["boxes"] = np.array(boxes, dtype=np.float32)
-                    img_preds[c]["scores"] = np.array(c_scores, dtype=np.float32)
-
-                results.append(img_preds)
-
-        return results
+        """Run unified forward + shared DETR OBB decoding on PIL images."""
+        return self._predict_unified(
+            images,
+            conf_thresh=conf_thresh,
+            iou_thresh=iou_thresh,
+            class_names=class_names,
+            ground_truth_hints=ground_truth_hints,
+        )

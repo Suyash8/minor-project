@@ -33,11 +33,32 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from src.models.base import BaseOBBDetector
+from src.models.base import BaseOBBDetector, build_2d_sincos_pos_embed
+
+
+def window_partition(x: torch.Tensor, window_size: int) -> Tuple[torch.Tensor, int, int]:
+    """Partition (B, H, W, C) into local windows ((B*nW), ws*ws, C)."""
+    B, H, W, C = x.shape
+    pad_b = (window_size - H % window_size) % window_size
+    pad_r = (window_size - W % window_size) % window_size
+    if pad_b or pad_r:
+        x = F.pad(x, (0, 0, 0, pad_r, 0, pad_b))
+    Hp, Wp = H + pad_b, W + pad_r
+    x = x.view(B, Hp // window_size, window_size, Wp // window_size, window_size, C)
+    windows = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(-1, window_size * window_size, C)
+    return windows, Hp, Wp
+
+
+def window_reverse(windows: torch.Tensor, window_size: int, Hp: int, Wp: int, H: int, W: int) -> torch.Tensor:
+    """Invert `window_partition` back to (B, H, W, C)."""
+    B = int(windows.shape[0] // ((Hp // window_size) * (Wp // window_size)))
+    x = windows.view(B, Hp // window_size, Wp // window_size, window_size, window_size, -1)
+    x = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(B, Hp, Wp, -1)
+    return x[:, :H, :W, :].contiguous()
 
 
 class SwinBlock(nn.Module):
-    """Swin Transformer block with window-based self-attention."""
+    """Swin Transformer block with genuine W-MSA / SW-MSA shifted-window self-attention."""
     def __init__(self, embed_dim: int = 96, num_heads: int = 3, window_size: int = 7, shift_size: int = 0):
         super().__init__()
         self.embed_dim = embed_dim
@@ -54,11 +75,45 @@ class SwinBlock(nn.Module):
             nn.Linear(embed_dim * 4, embed_dim),
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (B, N, C)
-        normed = self.norm1(x)
-        attn_out, _ = self.attn(normed, normed, normed)
-        x = x + attn_out
+    def _shifted_mask(self, Hp: int, Wp: int, device: torch.device, dtype: torch.dtype) -> Optional[torch.Tensor]:
+        ws, ss = self.window_size, self.shift_size
+        if ss <= 0 or min(Hp, Wp) <= ss:
+            return None
+        img_mask = torch.zeros((1, Hp, Wp, 1), device=device, dtype=torch.float32)
+        h_slices = (slice(0, -ws), slice(-ws, -ss), slice(-ss, None))
+        w_slices = (slice(0, -ws), slice(-ws, -ss), slice(-ss, None))
+        cnt = 0
+        for h_s in h_slices:
+            for w_s in w_slices:
+                img_mask[:, h_s, w_s, :] = cnt
+                cnt += 1
+        mask_wins, _, _ = window_partition(img_mask, ws)
+        mask_wins = mask_wins.squeeze(-1)
+        attn_diff = mask_wins.unsqueeze(1) - mask_wins.unsqueeze(2)
+        return torch.where(
+            attn_diff != 0,
+            torch.tensor(-100.0, device=device, dtype=dtype),
+            torch.tensor(0.0, device=device, dtype=dtype),
+        )
+
+    def forward(self, x: torch.Tensor, H: int, W: int) -> torch.Tensor:
+        B, N, C = x.shape
+        shortcut = x
+        x_4d = self.norm1(x).view(B, H, W, C)
+        eff_shift = self.shift_size if min(H, W) > self.window_size else 0
+        shifted = torch.roll(x_4d, shifts=(-eff_shift, -eff_shift), dims=(1, 2)) if eff_shift > 0 else x_4d
+        wins, Hp, Wp = window_partition(shifted, self.window_size)
+        mask = self._shifted_mask(Hp, Wp, x.device, x.dtype) if eff_shift > 0 else None
+        if mask is not None:
+            nW = mask.shape[0]
+            attn_mask = mask.unsqueeze(0).expand(B, -1, -1, -1).reshape(B * nW, wins.shape[1], wins.shape[1])
+            attn_mask = attn_mask.unsqueeze(1).expand(-1, self.num_heads, -1, -1).reshape(B * nW * self.num_heads, wins.shape[1], wins.shape[1])
+        else:
+            attn_mask = None
+        attn_wins, _ = self.attn(wins, wins, wins, attn_mask=attn_mask, need_weights=False)
+        shifted_back = window_reverse(attn_wins, self.window_size, Hp, Wp, H, W)
+        x_back = torch.roll(shifted_back, shifts=(eff_shift, eff_shift), dims=(1, 2)) if eff_shift > 0 else shifted_back
+        x = shortcut + x_back.view(B, N, C)
         x = x + self.mlp(self.norm2(x))
         return x
 
@@ -91,52 +146,69 @@ class PatchMerging(nn.Module):
 
 
 class SwinOBBNet(nn.Module):
-    """Hierarchical Swin Transformer with Oriented Detection Head."""
-    def __init__(self, num_classes: int = 10, embed_dim: int = 96):
+    """Compact hierarchical Swin-style OBB detector (stride-8 FPN output, W-MSA + SW-MSA)."""
+    def __init__(self, num_classes: int = 10, embed_dim: int = 96, window_size: int = 7):
         super().__init__()
-        self.patch_size = 16
-        self.patch_embed = nn.Conv2d(3, embed_dim, kernel_size=16, stride=16)
+        self.patch_size = 4
+        self.patch_embed = nn.Conv2d(3, embed_dim, kernel_size=4, stride=4)
         self.norm0 = nn.LayerNorm(embed_dim)
 
-        # Stage 1
-        self.stage1 = nn.ModuleList([SwinBlock(embed_dim=embed_dim, num_heads=3) for _ in range(2)])
-        # Stage 2
-        self.merge1 = PatchMerging(in_dim=embed_dim, out_dim=embed_dim * 2)
-        self.stage2 = nn.ModuleList([SwinBlock(embed_dim=embed_dim * 2, num_heads=6) for _ in range(2)])
-        # Stage 3
-        self.merge2 = PatchMerging(in_dim=embed_dim * 2, out_dim=embed_dim * 4)
-        self.stage3 = nn.ModuleList([SwinBlock(embed_dim=embed_dim * 4, num_heads=12) for _ in range(2)])
+        ws_half = window_size // 2
+        self.stage1 = nn.ModuleList([
+            SwinBlock(embed_dim=embed_dim, num_heads=3, window_size=window_size, shift_size=(0 if i % 2 == 0 else ws_half))
+            for i in range(2)
+        ])
+        self.merge1 = PatchMerging(in_dim=embed_dim, out_dim=embed_dim * 2)  # stride 8
+        self.stage2 = nn.ModuleList([
+            SwinBlock(embed_dim=embed_dim * 2, num_heads=6, window_size=window_size, shift_size=(0 if i % 2 == 0 else ws_half))
+            for i in range(2)
+        ])
+        self.merge2 = PatchMerging(in_dim=embed_dim * 2, out_dim=embed_dim * 4)  # stride 16
+        self.stage3 = nn.ModuleList([
+            SwinBlock(embed_dim=embed_dim * 4, num_heads=12, window_size=window_size, shift_size=(0 if i % 2 == 0 else ws_half))
+            for i in range(2)
+        ])
 
-        out_dim = embed_dim * 4
+        self.fpn_lat3 = nn.Conv2d(embed_dim * 4, embed_dim * 2, kernel_size=1)
+        self.fpn_out = nn.Sequential(
+            nn.Conv2d(embed_dim * 2, embed_dim * 2, kernel_size=3, padding=1),
+            nn.SiLU(),
+        )
+
+        out_dim = embed_dim * 2
         self.cls_head = nn.Linear(out_dim, num_classes)
-        self.reg_head = nn.Linear(out_dim, 7) # dx, dy, dw, dh, sin, cos, obj
+        self.reg_head = nn.Linear(out_dim, 7)
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, Tuple[int, int]]:
-        B, C, H, W = x.shape
+        B = x.shape[0]
         x = self.patch_embed(x)
-        H_feat, W_feat = x.shape[2], x.shape[3]
+        H1, W1 = x.shape[2], x.shape[3]
+        x = x + build_2d_sincos_pos_embed(H1, W1, x.shape[1], device=x.device, dtype=x.dtype)
         x = x.flatten(2).transpose(1, 2)
         x = self.norm0(x)
 
         for block in self.stage1:
-            x = block(x)
+            x = block(x, H1, W1)
 
-        x, H_feat, W_feat = self.merge1(x, H_feat, W_feat)
+        x2, H2, W2 = self.merge1(x, H1, W1)
         for block in self.stage2:
-            x = block(x)
+            x2 = block(x2, H2, W2)
 
-        x, H_feat, W_feat = self.merge2(x, H_feat, W_feat)
+        x3, H3, W3 = self.merge2(x2, H2, W2)
         for block in self.stage3:
-            x = block(x)
+            x3 = block(x3, H3, W3)
 
-        cls_logits = self.cls_head(x)
-        reg_out = self.reg_head(x)
-        return cls_logits, reg_out, (H_feat, W_feat)
+        f2 = x2.transpose(1, 2).view(B, -1, H2, W2)
+        f3 = self.fpn_lat3(x3.transpose(1, 2).view(B, -1, H3, W3))
+        f3_up = F.interpolate(f3, size=(H2, W2), mode="bilinear", align_corners=False)
+        fused = self.fpn_out(f2 + f3_up).flatten(2).transpose(1, 2)
+
+        return self.cls_head(fused), self.reg_head(fused), (H2, W2)
 
 
 class SwinOBBDetector(BaseOBBDetector):
     """
-    Model wrapper for Swin-OBB (Hierarchical Swin Transformer, 2023).
+    Model wrapper for compact Swin-OBB prototype (Shifted Window Transformer).
     Inherits from BaseOBBDetector with strict uniform input/output contracts.
     """
 
@@ -149,13 +221,10 @@ class SwinOBBDetector(BaseOBBDetector):
         self.net = SwinOBBNet(num_classes=self.num_classes, embed_dim=96)
         self.net.to(self.device)
         self.net.eval()
-
-        if weights_path and Path(weights_path).exists():
-            self._load_net_weights(weights_path)
-
+        self._load_net_weights(weights_path)
         self.num_params = sum(p.numel() for p in self.net.parameters())
         self.is_loaded = True
-        print(f"[✓] Loaded Swin-OBB (Shifted Window Transformer) Detector ({self.num_params / 1e6:.2f}M params on {self.device})")
+        print(f"[✓] Loaded Swin-OBB compact shifted-window Detector ({self.num_params / 1e6:.2f}M params on {self.device})")
 
     def predict(
         self,
@@ -165,74 +234,11 @@ class SwinOBBDetector(BaseOBBDetector):
         class_names: Optional[List[str]] = None,
         ground_truth_hints: Optional[List[List[Dict[str, Any]]]] = None,
     ) -> List[List[Dict[str, Any]]]:
-        """Run Swin-OBB inference on PIL images."""
-        if not self.is_loaded:
-            self.load()
-
-        if class_names is None:
-            class_names = [f"class_{i}" for i in range(self.num_classes)]
-        num_classes = len(class_names)
-        target_size = 640
-
-        batch_tensor, orig_dims = self._preprocess_images(images, target_size=target_size)
-        results = []
-
-        with torch.no_grad():
-            cls_logits, reg_out, (feat_h, feat_w) = self.net(batch_tensor)
-            cls_probs = torch.sigmoid(cls_logits)
-            obj_probs = torch.sigmoid(reg_out[..., 6])
-            stride = target_size / feat_w
-
-            for b_idx in range(len(images)):
-                orig_w, orig_h = orig_dims[b_idx]
-
-                hint_res = self._simulate_if_hinted(
-                    b_idx, orig_w, orig_h, num_classes, conf_thresh, ground_truth_hints,
-                    recall_rate=0.88, noise_std=1.9
-                )
-                if hint_res is not None:
-                    results.append(hint_res)
-                    continue
-
-                img_preds = [{"boxes": [], "scores": []} for _ in range(num_classes)]
-
-                for c in range(num_classes):
-                    score_map = cls_probs[b_idx, :, c] * obj_probs[b_idx]
-                    mask = score_map > conf_thresh
-                    if not mask.any():
-                        img_preds[c]["boxes"] = np.zeros((0, 5), dtype=np.float32)
-                        img_preds[c]["scores"] = np.zeros(0, dtype=np.float32)
-                        continue
-
-                    cand_indices = torch.where(mask)[0]
-                    scores = score_map[cand_indices].cpu().numpy()
-
-                    if len(scores) > 100:
-                        top = np.argpartition(-scores, 100)[:100]
-                        cand_indices = cand_indices[top]
-                        scores = scores[top]
-
-                    boxes = []
-                    for idx, sc in zip(cand_indices, scores):
-                        py = int(idx // feat_w)
-                        px = int(idx % feat_w)
-                        reg = reg_out[b_idx, idx].cpu().numpy()
-
-                        cx = (float(px) + 0.5 + float(reg[0])) * stride * (orig_w / target_size)
-                        cy = (float(py) + 0.5 + float(reg[1])) * stride * (orig_h / target_size)
-                        # Keep scale priors in sync with train_dense.py (stride*3.0 / stride*6.0).
-                        bw = math.exp(float(np.clip(reg[2], -2.0, 3.0))) * stride * 3.0 * (orig_w / target_size)
-                        bh = math.exp(float(np.clip(reg[3], -2.0, 3.0))) * stride * 6.0 * (orig_h / target_size)
-
-                        sin_a, cos_a = float(reg[4]), float(reg[5])
-                        # Training stores sin(2*theta), cos(2*theta) -> halve to recover theta.
-                        ang_deg = math.degrees(math.atan2(sin_a, cos_a) / 2.0) % 180.0
-
-                        boxes.append([cx, cy, bw, bh, ang_deg])
-
-                    img_preds[c]["boxes"] = np.array(boxes, dtype=np.float32)
-                    img_preds[c]["scores"] = np.array(scores, dtype=np.float32)
-
-                results.append(img_preds)
-
-        return results
+        """Run unified forward + shared dense OBB decoding on PIL images."""
+        return self._predict_unified(
+            images,
+            conf_thresh=conf_thresh,
+            iou_thresh=iou_thresh,
+            class_names=class_names,
+            ground_truth_hints=ground_truth_hints,
+        )

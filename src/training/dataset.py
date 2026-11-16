@@ -70,15 +70,19 @@ class UnifiedOBBDataset(Dataset):
         self.resize_mode = resize_mode
         self.normalize_on_gpu = normalize_on_gpu
         self._seed = seed
-        self._epoch = 0
+        # Shared tensor so persistent DataLoader workers observe set_epoch updates (F07)
+        self._epoch_tensor = torch.zeros(1, dtype=torch.int64).share_memory_()
+
+    @property
+    def _epoch(self) -> int:
+        return int(self._epoch_tensor[0].item())
 
     def __len__(self) -> int:
         return len(self.raw)
 
     def set_epoch(self, epoch: int) -> None:
-        """Seed augmentation deterministically per epoch when --deterministic
-        is used (called by the engines at each epoch start)."""
-        self._epoch = epoch
+        """Seed augmentation deterministically per epoch across persistent workers (F07)."""
+        self._epoch_tensor[0] = int(epoch)
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         img = self.raw.get_image_array(idx)  # (H, W, 3) uint8 RGB

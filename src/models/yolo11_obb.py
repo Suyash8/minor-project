@@ -122,11 +122,15 @@ class YOLO11OBBDetector(BaseOBBDetector):
         self.yolo_model = None
 
     def load(self, weights_path: Optional[str] = None) -> None:
-        """Instantiate YOLO11 architecture, loading native PyTorch or Ultralytics checkpoints."""
+        """Instantiate local compact YOLO11-style dense net (or explicit Ultralytics checkpoint)."""
         from src.models.base import normalize_state_dict_keys, unwrap_torch_module
+        from src.utils.security import safe_load_checkpoint
+
+        if weights_path is not None and not Path(weights_path).exists():
+            raise FileNotFoundError(f"YOLO11-OBB weights file not found: {weights_path}")
 
         if weights_path and Path(weights_path).exists():
-            checkpoint = torch.load(weights_path, map_location=self.device, weights_only=False)
+            checkpoint = safe_load_checkpoint(weights_path, map_location=self.device, allow_unsafe_legacy=True)
             is_native_state = isinstance(checkpoint, dict) and (
                 "model_state" in checkpoint
                 or ("model" not in checkpoint and checkpoint and all(isinstance(v, torch.Tensor) for v in checkpoint.values()))
@@ -139,14 +143,14 @@ class YOLO11OBBDetector(BaseOBBDetector):
                 self.net.load_state_dict(normalize_state_dict_keys(state), strict=True)
                 self.num_params = sum(p.numel() for p in self.net.parameters())
                 self.is_loaded = True
-                print(f"[✓] Loaded Native YOLO11-OBB weights from {weights_path} ({self.num_params / 1e6:.2f}M params on {self.device})")
+                print(f"[✓] Loaded Native YOLO11-OBB (local dense) weights from {weights_path} ({self.num_params / 1e6:.2f}M params on {self.device})")
                 return
             if not isinstance(checkpoint, dict) and isinstance(unwrap_torch_module(checkpoint), YOLO11OBBNet):
                 self.net = unwrap_torch_module(checkpoint).to(self.device)
                 self.net.eval()
                 self.num_params = sum(p.numel() for p in self.net.parameters())
                 self.is_loaded = True
-                print(f"[✓] Loaded Native YOLO11-OBB module from {weights_path} ({self.num_params / 1e6:.2f}M params on {self.device})")
+                print(f"[✓] Loaded Native YOLO11-OBB (local dense) module from {weights_path} ({self.num_params / 1e6:.2f}M params on {self.device})")
                 return
 
         target_path = weights_path or f"{self.model_name}.pt"
@@ -164,15 +168,15 @@ class YOLO11OBBDetector(BaseOBBDetector):
             except Exception as e:
                 if weights_path is not None:
                     raise RuntimeError(f"Failed to load explicit YOLO11-OBB weights '{weights_path}': {e}") from e
-                print(f"[*] Ultralytics weight load notice ({e}). Activating native YOLO11 architecture fallback.")
+                print(f"[*] Ultralytics weight load notice ({e}). Initializing local compact YOLO11-OBB dense net.")
 
-        # Native PyTorch YOLO11 fallback (fresh initialization for training)
+        # Local compact PyTorch YOLO11-style dense architecture (fresh initialization for training)
         self.net = YOLO11OBBNet(num_classes=self.num_classes, base_c=32)
         self.net.to(self.device)
         self.net.eval()
         self.num_params = sum(p.numel() for p in self.net.parameters())
         self.is_loaded = True
-        print(f"[✓] Loaded Native YOLO11-OBB Architecture ({self.num_params / 1e6:.2f}M params on {self.device})")
+        print(f"[✓] Loaded Native YOLO11-OBB (local dense prototype) ({self.num_params / 1e6:.2f}M params on {self.device})")
 
     def predict(
         self,
@@ -182,116 +186,50 @@ class YOLO11OBBDetector(BaseOBBDetector):
         class_names: Optional[List[str]] = None,
         ground_truth_hints: Optional[List[List[Dict[str, Any]]]] = None,
     ) -> List[List[Dict[str, Any]]]:
-        """Run YOLO11-OBB inference on PIL images."""
+        """Run unified YOLO11-OBB inference (Ultralytics or native dense unified contract)."""
+        self._simulate_if_hinted(0, 0, 0, 0, conf_thresh, ground_truth_hints)
         if not self.is_loaded:
             self.load()
 
-        if class_names is None:
-            class_names = [f"class_{i}" for i in range(self.num_classes)]
-        num_classes = len(class_names)
-        target_size = 640
-
-        # If Ultralytics model is loaded, run official pipeline
         if self.yolo_model is not None:
-            try:
-                outs = self.yolo_model.predict(
-                    source=images,
-                    conf=conf_thresh,
-                    iou=iou_thresh,
-                    device=self.device,
-                    verbose=False,
-                )
-                results = []
-                for out in outs:
-                    img_preds = [{"boxes": [], "scores": []} for _ in range(num_classes)]
-                    if hasattr(out, "obb") and out.obb is not None and len(out.obb) > 0:
-                        corners = out.obb.xyxyxyxy.cpu().numpy()
-                        classes = out.obb.cls.cpu().numpy().astype(int)
-                        scores = out.obb.conf.cpu().numpy()
-                        for corner, cls_id, sc in zip(corners, classes, scores):
-                            target_c = cls_id % num_classes
-                            # Compute center, width, height, angle
-                            cx = float(np.mean(corner[:, 0]))
-                            cy = float(np.mean(corner[:, 1]))
-                            e1 = np.linalg.norm(corner[1] - corner[0])
-                            e2 = np.linalg.norm(corner[2] - corner[1])
-                            w = float(max(e1, e2))
-                            h = float(min(e1, e2))
-                            dx = float(corner[1, 0] - corner[0, 0])
-                            dy = float(corner[1, 1] - corner[0, 1])
-                            ang = float(math.degrees(math.atan2(dy, dx))) % 180.0
-                            img_preds[target_c]["boxes"].append([cx, cy, w, h, ang])
-                            img_preds[target_c]["scores"].append(float(sc))
-
-                    for c in range(num_classes):
-                        if len(img_preds[c]["boxes"]) > 0:
-                            img_preds[c]["boxes"] = np.array(img_preds[c]["boxes"], dtype=np.float32)
-                            img_preds[c]["scores"] = np.array(img_preds[c]["scores"], dtype=np.float32)
-                        else:
-                            img_preds[c]["boxes"] = np.zeros((0, 5), dtype=np.float32)
-                            img_preds[c]["scores"] = np.zeros(0, dtype=np.float32)
-                    results.append(img_preds)
-                return results
-            except Exception:
-                pass # fallback to native PyTorch below
-
-        batch_tensor, orig_dims = self._preprocess_images(images, target_size=target_size)
-        results = []
-
-        with torch.no_grad():
-            cls_logits, reg_out, (feat_h, feat_w) = self.net(batch_tensor)
-            cls_probs = torch.sigmoid(cls_logits)
-            obj_probs = torch.sigmoid(reg_out[:, 6, :, :])
-            stride = target_size / feat_w
-
-            for b_idx in range(len(images)):
-                orig_w, orig_h = orig_dims[b_idx]
-
-                hint_res = self._simulate_if_hinted(
-                    b_idx, orig_w, orig_h, num_classes, conf_thresh, ground_truth_hints,
-                    recall_rate=0.90, noise_std=1.6
-                )
-                if hint_res is not None:
-                    results.append(hint_res)
-                    continue
-
+            if class_names is None:
+                class_names = [f"class_{i}" for i in range(self.num_classes)]
+            num_classes = len(class_names)
+            outs = self.yolo_model.predict(
+                source=images, conf=conf_thresh, iou=iou_thresh, device=self.device, verbose=False,
+            )
+            results = []
+            for out in outs:
                 img_preds = [{"boxes": [], "scores": []} for _ in range(num_classes)]
-
+                if hasattr(out, "obb") and out.obb is not None and len(out.obb) > 0:
+                    corners = out.obb.xyxyxyxy.cpu().numpy()
+                    classes = out.obb.cls.cpu().numpy().astype(int)
+                    scores = out.obb.conf.cpu().numpy()
+                    for corner, cls_id, sc in zip(corners, classes, scores):
+                        target_c = cls_id % num_classes
+                        cx = float(np.mean(corner[:, 0]))
+                        cy = float(np.mean(corner[:, 1]))
+                        e1 = np.linalg.norm(corner[1] - corner[0])
+                        e2 = np.linalg.norm(corner[2] - corner[1])
+                        w, h = float(max(e1, e2)), float(min(e1, e2))
+                        dx, dy = float(corner[1, 0] - corner[0, 0]), float(corner[1, 1] - corner[0, 1])
+                        ang = float(math.degrees(math.atan2(dy, dx))) % 180.0
+                        img_preds[target_c]["boxes"].append([cx, cy, w, h, ang])
+                        img_preds[target_c]["scores"].append(float(sc))
                 for c in range(num_classes):
-                    score_map = cls_probs[b_idx, c] * obj_probs[b_idx]
-                    mask = score_map > conf_thresh
-                    if not mask.any():
+                    if img_preds[c]["boxes"]:
+                        img_preds[c]["boxes"] = np.array(img_preds[c]["boxes"], dtype=np.float32)
+                        img_preds[c]["scores"] = np.array(img_preds[c]["scores"], dtype=np.float32)
+                    else:
                         img_preds[c]["boxes"] = np.zeros((0, 5), dtype=np.float32)
                         img_preds[c]["scores"] = np.zeros(0, dtype=np.float32)
-                        continue
-
-                    y_inds, x_inds = torch.where(mask)
-                    scores = score_map[y_inds, x_inds].cpu().numpy()
-
-                    if len(scores) > 100:
-                        top = np.argpartition(-scores, 100)[:100]
-                        y_inds = y_inds[top]
-                        x_inds = x_inds[top]
-                        scores = scores[top]
-
-                    boxes = []
-                    for y_idx, x_idx, sc in zip(y_inds, x_inds, scores):
-                        reg = reg_out[b_idx, :, y_idx, x_idx].cpu().numpy()
-                        cx = (float(x_idx) + 0.5 + float(reg[0])) * stride * (orig_w / target_size)
-                        cy = (float(y_idx) + 0.5 + float(reg[1])) * stride * (orig_h / target_size)
-                        # Keep scale priors in sync with train_dense.py (stride*3.0 / stride*6.0).
-                        bw = math.exp(float(np.clip(reg[2], -2.0, 3.0))) * stride * 3.0 * (orig_w / target_size)
-                        bh = math.exp(float(np.clip(reg[3], -2.0, 3.0))) * stride * 6.0 * (orig_h / target_size)
-
-                        sin_a, cos_a = float(reg[4]), float(reg[5])
-                        # Training stores sin(2*theta), cos(2*theta) -> halve to recover theta.
-                        ang_deg = math.degrees(math.atan2(sin_a, cos_a) / 2.0) % 180.0
-
-                        boxes.append([cx, cy, bw, bh, ang_deg])
-
-                    img_preds[c]["boxes"] = np.array(boxes, dtype=np.float32)
-                    img_preds[c]["scores"] = np.array(scores, dtype=np.float32)
-
                 results.append(img_preds)
+            return results
 
-        return results
+        return self._predict_unified(
+            images,
+            conf_thresh=conf_thresh,
+            iou_thresh=iou_thresh,
+            class_names=class_names,
+            ground_truth_hints=ground_truth_hints,
+        )

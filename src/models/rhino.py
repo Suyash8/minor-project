@@ -29,24 +29,26 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from src.models.base import BaseOBBDetector
+from src.models.base import BaseOBBDetector, build_2d_sincos_pos_embed
 
 
 class DynamicDenoisingLayer(nn.Module):
-    """Generates contrastive noisy queries to stabilize oriented bipartite matching."""
+    """Training-only query denoising perturbation (deterministic pass-through in eval mode)."""
     def __init__(self, embed_dim: int = 192):
         super().__init__()
         self.noise_scale = nn.Parameter(torch.tensor(0.1))
         self.proj = nn.Linear(embed_dim, embed_dim)
 
     def forward(self, queries: torch.Tensor) -> torch.Tensor:
-        noise = torch.randn_like(queries) * self.noise_scale
-        return self.proj(queries + noise)
+        if self.training:
+            noise = torch.randn_like(queries) * self.noise_scale
+            queries = queries + noise
+        return self.proj(queries)
 
 
 class RHINONet(nn.Module):
-    """End-to-End RHINO (Rotated DINO) Architecture."""
-    def __init__(self, num_classes: int = 10, num_queries: int = 100, embed_dim: int = 192):
+    """Compact RHINO prototype (2D spatial PE + training-only query denoising)."""
+    def __init__(self, num_classes: int = 10, num_queries: int = 300, embed_dim: int = 192):
         super().__init__()
         self.num_queries = num_queries
         self.embed_dim = embed_dim
@@ -73,7 +75,7 @@ class RHINONet(nn.Module):
 
         self.cls_head = nn.Linear(embed_dim, num_classes + 1)
         nn.init.constant_(self.cls_head.bias, math.log(.01/.99))
-        # Legacy background row retained only for old checkpoint compatibility.
+        # Legacy background row retained only for shape parity.
         self.box_head = nn.Sequential(
             nn.Linear(embed_dim, embed_dim),
             nn.ReLU(),
@@ -83,7 +85,10 @@ class RHINONet(nn.Module):
 
     def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
         B = x.shape[0]
-        feats = self.backbone(x).flatten(2).transpose(1, 2) # (B, N, embed_dim)
+        feat_2d = self.backbone(x)
+        H, W = feat_2d.shape[2], feat_2d.shape[3]
+        feat_2d = feat_2d + build_2d_sincos_pos_embed(H, W, self.embed_dim, device=x.device, dtype=feat_2d.dtype)
+        feats = feat_2d.flatten(2).transpose(1, 2) # (B, N, embed_dim)
         queries = self.query_embed.weight.unsqueeze(0).repeat(B, 1, 1)
 
         queries = self.denoising(queries)
@@ -106,7 +111,7 @@ class RHINONet(nn.Module):
 
 class RHINODetector(BaseOBBDetector):
     """
-    Model wrapper for RHINO (Rotated DINO DETR, CVPR 2024).
+    Model wrapper for compact RHINO prototype (Rotated DINO DETR style).
     Inherits from BaseOBBDetector with strict uniform input/output contracts.
     """
 
@@ -116,16 +121,13 @@ class RHINODetector(BaseOBBDetector):
 
     def load(self, weights_path: Optional[str] = None) -> None:
         """Instantiate RHINO architecture and load weights if provided."""
-        self.net = RHINONet(num_classes=self.num_classes, num_queries=100, embed_dim=192)
+        self.net = RHINONet(num_classes=self.num_classes, num_queries=300, embed_dim=192)
         self.net.to(self.device)
         self.net.eval()
-
-        if weights_path and Path(weights_path).exists():
-            self._load_net_weights(weights_path)
-
+        self._load_net_weights(weights_path)
         self.num_params = sum(p.numel() for p in self.net.parameters())
         self.is_loaded = True
-        print(f"[✓] Loaded RHINO (Rotated DINO DETR) Detector ({self.num_params / 1e6:.2f}M params on {self.device})")
+        print(f"[✓] Loaded RHINO compact prototype Detector ({self.num_params / 1e6:.2f}M params on {self.device})")
 
     def predict(
         self,
@@ -135,65 +137,11 @@ class RHINODetector(BaseOBBDetector):
         class_names: Optional[List[str]] = None,
         ground_truth_hints: Optional[List[List[Dict[str, Any]]]] = None,
     ) -> List[List[Dict[str, Any]]]:
-        """Run RHINO inference on PIL images."""
-        if not self.is_loaded:
-            self.load()
-
-        if class_names is None:
-            class_names = [f"class_{i}" for i in range(self.num_classes)]
-        num_classes = len(class_names)
-        target_size = 640
-
-        batch_tensor, orig_dims = self._preprocess_images(images, target_size=target_size)
-        results = []
-
-        with torch.no_grad():
-            outputs = self.net(batch_tensor)
-            cls_probs = outputs["cls_logits"][..., :num_classes].sigmoid()
-            box_norm = outputs["box_norm"]
-            angle_vec = outputs["angle_vec"]
-
-            for b_idx in range(len(images)):
-                orig_w, orig_h = orig_dims[b_idx]
-
-                hint_res = self._simulate_if_hinted(
-                    b_idx, orig_w, orig_h, num_classes, conf_thresh, ground_truth_hints,
-                    recall_rate=0.88, noise_std=1.9
-                )
-                if hint_res is not None:
-                    results.append(hint_res)
-                    continue
-
-                img_preds = [{"boxes": [], "scores": []} for _ in range(num_classes)]
-
-                for c in range(num_classes):
-                    scores = cls_probs[b_idx, :, c].cpu().numpy()
-                    mask = scores > conf_thresh
-                    if not mask.any():
-                        img_preds[c]["boxes"] = np.zeros((0, 5), dtype=np.float32)
-                        img_preds[c]["scores"] = np.zeros(0, dtype=np.float32)
-                        continue
-
-                    cand_inds = np.where(mask)[0]
-                    c_scores = scores[cand_inds]
-                    boxes = []
-
-                    for idx, sc in zip(cand_inds, c_scores):
-                        norm_box = box_norm[b_idx, idx].cpu().numpy()
-                        cx = float(norm_box[0] * orig_w)
-                        cy = float(norm_box[1] * orig_h)
-                        bw = float(norm_box[2] * orig_w * 0.4)
-                        bh = float(norm_box[3] * orig_h * 0.4)
-
-                        sin_a = float(angle_vec[b_idx, idx, 0])
-                        cos_a = float(angle_vec[b_idx, idx, 1])
-                        ang_deg = math.degrees(math.atan2(sin_a, cos_a)) % 180.0
-
-                        boxes.append([cx, cy, bw, bh, ang_deg])
-
-                    img_preds[c]["boxes"] = np.array(boxes, dtype=np.float32)
-                    img_preds[c]["scores"] = np.array(c_scores, dtype=np.float32)
-
-                results.append(img_preds)
-
-        return results
+        """Run unified forward + shared DETR OBB decoding on PIL images."""
+        return self._predict_unified(
+            images,
+            conf_thresh=conf_thresh,
+            iou_thresh=iou_thresh,
+            class_names=class_names,
+            ground_truth_hints=ground_truth_hints,
+        )

@@ -76,12 +76,21 @@ def compute_regression_metrics(
     gt_angles = matched_gt_boxes[:, 4]
     pred_angles = matched_pred_boxes[:, 4]
 
-    # Periodic angular errors
+    # Periodic angular errors (180-deg modulo for OBB symmetry; F22)
     angle_diffs = compute_angular_differences(gt_angles, pred_angles, period=180.0)
     angle_mae = float(np.mean(angle_diffs))
     angle_rmse = float(np.sqrt(np.mean(angle_diffs ** 2)))
 
-    # Direct correlation & R²
+    # Circular orientation agreement (2*theta doubled-angle cosine & circular correlation)
+    gt_2rad = 2.0 * np.deg2rad(gt_angles)
+    pred_2rad = 2.0 * np.deg2rad(pred_angles)
+    angle_cos2_mean = float(np.mean(np.cos(gt_2rad - pred_2rad)))
+    s_gt = np.sin(gt_2rad - np.angle(np.mean(np.exp(1j * gt_2rad))))
+    s_pr = np.sin(pred_2rad - np.angle(np.mean(np.exp(1j * pred_2rad))))
+    denom = float(np.sqrt(np.sum(s_gt ** 2) * np.sum(s_pr ** 2)))
+    angle_circular_r = float(np.sum(s_gt * s_pr) / denom) if denom > 1e-12 else 0.0
+
+    # Raw linear correlations on unwrapped degree values (boundary-sensitive; interpret with angle_mae/angle_circular_r)
     angle_r = compute_pearson_correlation(gt_angles, pred_angles)
     angle_rho = compute_spearman_correlation(gt_angles, pred_angles)
     angle_r2 = compute_r2_score(gt_angles, pred_angles)
@@ -103,6 +112,8 @@ def compute_regression_metrics(
         "num_matched": len(matched_gt_boxes),
         "angle_mae": angle_mae,
         "angle_rmse": angle_rmse,
+        "angle_circular_r": angle_circular_r,
+        "angle_cos2_mean_similarity": angle_cos2_mean,
         "angle_pearson_r": angle_r,
         "angle_spearman_rho": angle_rho,
         "angle_r2": angle_r2,

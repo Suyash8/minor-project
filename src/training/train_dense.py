@@ -65,6 +65,7 @@ from src.training.engine_common import (
     seed_all,
     setup_perf_flags,
     unwrap_model,
+    write_bundle_manifest,
 )
 from src.utils.system import auto_configure_hardware
 
@@ -187,22 +188,65 @@ def encode_dense_targets(
         cx, cy, w, h, ang_deg = (cx[valid], cy[valid], w[valid], h[valid],
                                  ang_deg[valid])
 
-        dx = (cx / stride_x) - (gx.float() + 0.5)
-        dy = (cy / stride_y) - (gy.float() + 0.5)
-        log_w = torch.log(torch.clamp(w / (stride_x * W_PRIOR),
-                                           min=MIN_PRIOR_FRAC))
-        log_h = torch.log(torch.clamp(h / (stride_y * H_PRIOR),
-                                           min=MIN_PRIOR_FRAC))
-        ang_rad = torch.deg2rad(ang_deg)
-        sin_a = torch.sin(2.0 * ang_rad)
-        cos_a = torch.cos(2.0 * ang_rad)
-        ones = torch.ones_like(dx)
-        vals = torch.stack([dx, dy, log_w, log_h, sin_a, cos_a, ones], dim=0)
+        # Collision-aware assignment (F06): smallest objects claim exact centers first;
+        # colliding boxes spill to nearest free 3x3 neighbor with exact sub-cell offsets.
+        areas = (w * h).detach().cpu().tolist()
+        order = sorted(range(len(areas)), key=lambda i: areas[i])
+        occupied = torch.zeros((feat_h, feat_w), dtype=torch.bool)
 
-        gy_d, gx_d, lbl_d, vals_d = (gy.to(device), gx.to(device),
-                                     lbl.to(device), vals.to(device))
-        cls_targets[b, lbl_d, gy_d, gx_d] = 1.0
-        reg_targets[b, :, gy_d, gx_d] = vals_d
+        cx_list = cx.detach().cpu().tolist()
+        cy_list = cy.detach().cpu().tolist()
+        w_list = w.detach().cpu().tolist()
+        h_list = h.detach().cpu().tolist()
+        ang_list = ang_deg.detach().cpu().tolist()
+        gx_list = gx.detach().cpu().tolist()
+        gy_list = gy.detach().cpu().tolist()
+        lbl_list = lbl.detach().cpu().tolist()
+
+        assigned_rows = []
+        for idx in order:
+            gxi, gyi = int(gx_list[idx]), int(gy_list[idx])
+            cxi, cyi = float(cx_list[idx]), float(cy_list[idx])
+            chosen = None
+            if not occupied[gyi, gxi]:
+                chosen = (gxi, gyi)
+            else:
+                fx, fy = cxi / stride_x, cyi / stride_y
+                cands = []
+                for dy_n in (-1, 0, 1):
+                    ny = gyi + dy_n
+                    if not (0 <= ny < feat_h):
+                        continue
+                    for dx_n in (-1, 0, 1):
+                        nx = gxi + dx_n
+                        if not (0 <= nx < feat_w) or occupied[ny, nx]:
+                            continue
+                        cands.append(((fx - (nx + 0.5)) ** 2 + (fy - (ny + 0.5)) ** 2, nx, ny))
+                if cands:
+                    cands.sort(key=lambda t: t[0])
+                    chosen = (cands[0][1], cands[0][2])
+            if chosen is None:
+                continue
+            nx, ny = chosen
+            occupied[ny, nx] = True
+            dx_v = (cxi / stride_x) - (nx + 0.5)
+            dy_v = (cyi / stride_y) - (ny + 0.5)
+            lw_v = math.log(max(float(w_list[idx]) / (stride_x * W_PRIOR), MIN_PRIOR_FRAC))
+            lh_v = math.log(max(float(h_list[idx]) / (stride_y * H_PRIOR), MIN_PRIOR_FRAC))
+            arad = math.radians(float(ang_list[idx]))
+            assigned_rows.append((
+                int(lbl_list[idx]), ny, nx,
+                [dx_v, dy_v, lw_v, lh_v, math.sin(2.0 * arad), math.cos(2.0 * arad), 1.0],
+            ))
+
+        if not assigned_rows:
+            continue
+        lbl_t = torch.tensor([r[0] for r in assigned_rows], dtype=torch.long, device=device)
+        ny_t = torch.tensor([r[1] for r in assigned_rows], dtype=torch.long, device=device)
+        nx_t = torch.tensor([r[2] for r in assigned_rows], dtype=torch.long, device=device)
+        vals_t = torch.tensor([r[3] for r in assigned_rows], dtype=torch.float32, device=device).T
+        cls_targets[b, lbl_t, ny_t, nx_t] = 1.0
+        reg_targets[b, :, ny_t, nx_t] = vals_t
 
     return cls_targets, reg_targets
 
@@ -488,7 +532,7 @@ def train_dense_model(
     net = maybe_channels_last(net, dev, enabled=(dev.type == "cuda"))
     net = maybe_compile(
         net, compile_model,
-        probe=(lambda: net(torch.zeros(
+        probe=(lambda m: m(torch.zeros(
             1, 3, img_size, img_size, device=dev)) if compile_model else None))
 
     criterion = OBBMaskLoss().to(dev)
@@ -538,12 +582,14 @@ def train_dense_model(
     start_epoch = 1
     best_map50 = -1.0
     best_val_loss = float("inf")
-    epochs_since_best = 0  # restored from the checkpoint on resume (review D)
+    best_epoch = None
+    epochs_since_best = 0  # eval-check counter restored on resume (review D)
     history: List[Dict[str, Any]] = []
 
     if resume and last_weights_path.exists():
         try:
-            ckpt = torch.load(last_weights_path, map_location=dev, weights_only=False)
+            from src.utils.security import safe_load_checkpoint
+            ckpt = safe_load_checkpoint(last_weights_path, map_location=dev, allow_unsafe_legacy=True)
             raw_net = unwrap_model(net)
             clean_state = normalize_state_dict_keys(ckpt["model_state"])
             missing, unexpected = raw_net.load_state_dict(clean_state,
@@ -554,6 +600,7 @@ def train_dense_model(
             if raw_net.state_dict() and len(missing) >= len(raw_net.state_dict()):
                 raise RuntimeError("zero matching keys loaded from checkpoint model_state")
             epochs_since_best = ckpt.get("epochs_since_best", 0)
+            best_epoch = ckpt.get("best_epoch")
             if "optimizer_state" in ckpt:
                 optimizer.load_state_dict(ckpt["optimizer_state"])
             if "scheduler_state" in ckpt:
@@ -880,6 +927,7 @@ def train_dense_model(
         if is_best:
             best_map50 = val_map50 if not math.isnan(val_map50) else best_map50
             best_val_loss = val_loss
+            best_epoch = epoch
             epochs_since_best = 0
         elif map_evaluated or not val_map:
             epochs_since_best += 1
@@ -927,15 +975,29 @@ def train_dense_model(
                              if ema_tracker is not None
                              else unwrap_model(net).state_dict()),
                 best_map50=best_map50, best_val_loss=best_val_loss,
+                best_epoch=best_epoch,
                 num_classes=num_classes, config=config_snapshot)
 
+        if run_dir is not None:
+            bundle_path = write_bundle_manifest(
+                run_path,
+                last_path=last_weights_path,
+                last_epoch=epoch,
+                best_path=best_weights_path,
+                best_epoch=best_epoch,
+                selection_metric=("mAP50" if val_map else "val_loss"),
+                best_map50=best_map50,
+                best_val_loss=best_val_loss,
+                is_ema=(ema_tracker is not None),
+            )
+            mirror.submit(bundle_path)
         mirror.submit_epoch(epoch, last_weights_path, logger.csv_path, logger.log_path)
         if is_best:
             mirror.submit(best_weights_path)
 
         if patience and epochs_since_best >= patience:
-            print(f"[!] Early stopping at epoch {epoch}: no val mAP50 "
-                  f"improvement for {patience} epochs")
+            print(f"[!] Early stopping at epoch {epoch}: no improvement "
+                  f"for {epochs_since_best} eval check(s) (cadence={val_map_every} epoch(s))")
             break
 
     mirror_errors = mirror.finish()
@@ -951,6 +1013,7 @@ def train_dense_model(
         "best_weights": str(best_weights_path),
         "last_weights": str(last_weights_path),
         "epochs_trained": max((int(row.get("epoch", 0)) for row in history), default=start_epoch-1),
+        "best_epoch": best_epoch,
         "best_map50": best_map50,
         "best_val_loss": best_val_loss,
         "oom_events": oom_events,

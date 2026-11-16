@@ -104,19 +104,29 @@ class AmpContext:
 
 
 def maybe_compile(net: torch.nn.Module, enabled: bool,
-                  probe: Optional[Callable[[], Any]] = None) -> torch.nn.Module:
+                  probe: Optional[Callable[[torch.nn.Module], Any]] = None) -> torch.nn.Module:
     """torch.compile behind a flag, with a graceful fallback (W4.4).
 
-    `probe` (optional) is a zero-arg callable running one dummy forward; it
-    forces lazy compilation NOW so a missing/broken backend falls back to
-    eager here instead of crashing mid-epoch-1 (review E).
+    `probe` receives the compiled module itself so lazy compilation failures
+    trigger fallback BEFORE training begins (F15). Also tolerates zero-arg probes.
     """
     if not enabled:
         return net
     try:
+        import inspect
         compiled = torch.compile(net)
         if probe is not None:
-            probe()
+            was_training = compiled.training
+            compiled.eval()
+            try:
+                with torch.no_grad():
+                    sig = inspect.signature(probe)
+                    if len(sig.parameters) == 0:
+                        probe()
+                    else:
+                        probe(compiled)
+            finally:
+                compiled.train(was_training)
         print("[perf] torch.compile enabled")
         return compiled
     except Exception as e:  # pragma: no cover - backend dependent
@@ -185,6 +195,16 @@ class ModelEMA:
 # ---------------------------------------------------------------------------
 # checkpoints
 # ---------------------------------------------------------------------------
+def file_sha256(path: Path) -> str:
+    """Streamed SHA-256 hex digest of a file."""
+    import hashlib
+    hasher = hashlib.sha256()
+    with Path(path).open("rb") as f:
+        for block in iter(lambda: f.read(1024 * 1024), b""):
+            hasher.update(block)
+    return hasher.hexdigest()
+
+
 def save_training_checkpoint(path: Path, **payload: Any) -> None:
     """Atomic checkpoint write (tmp + os.replace; W4.8)."""
     path = Path(path)
@@ -192,14 +212,61 @@ def save_training_checkpoint(path: Path, **payload: Any) -> None:
     tmp = path.with_name(path.name + ".tmp")
     torch.save(payload, tmp)
     os.replace(tmp, path)
-    import hashlib
-    with path.open("rb") as f:
-        hasher = hashlib.sha256()
-        for block in iter(lambda: f.read(1024*1024), b""):
-            hasher.update(block)
-        digest = hasher.hexdigest()
+    digest = file_sha256(path)
     atomic_save_json({"epoch": payload.get("epoch"), "checkpoint_size": path.stat().st_size, "sha256": digest},
-                     path.with_name(path.name+".progress.json"))
+                     path.with_name(path.name + ".progress.json"))
+
+
+def write_bundle_manifest(
+    run_dir: Path,
+    *,
+    last_path: Optional[Path] = None,
+    last_epoch: Optional[int] = None,
+    best_path: Optional[Path] = None,
+    best_epoch: Optional[int] = None,
+    selection_metric: str = "mAP50",
+    best_map50: Optional[float] = None,
+    best_val_loss: Optional[float] = None,
+    is_ema: bool = False,
+) -> Path:
+    """Write atomic transactional bundle_manifest.json binding last/best hashes and selection provenance (F13)."""
+    from datetime import datetime, timezone
+
+    run_path = Path(run_dir)
+    bundle_path = run_path / "bundle_manifest.json"
+    data: Dict[str, Any] = {}
+    if bundle_path.is_file():
+        try:
+            data = json.loads(bundle_path.read_text())
+        except (OSError, ValueError):
+            data = {}
+    data.update({
+        "schema_version": 1,
+        "selection_metric": selection_metric,
+        "best_epoch": best_epoch if best_epoch is not None else data.get("best_epoch"),
+        "best_map50": best_map50,
+        "best_val_loss": best_val_loss,
+        "is_ema": bool(is_ema),
+        "updated": datetime.now(timezone.utc).isoformat(),
+    })
+    if last_path is not None and Path(last_path).is_file():
+        lp = Path(last_path)
+        data["last"] = {
+            "filename": lp.name,
+            "epoch": last_epoch,
+            "checkpoint_size": lp.stat().st_size,
+            "sha256": file_sha256(lp),
+        }
+    if best_path is not None and Path(best_path).is_file():
+        bp = Path(best_path)
+        data["best"] = {
+            "filename": bp.name,
+            "epoch": best_epoch if best_epoch is not None else data.get("best_epoch"),
+            "checkpoint_size": bp.stat().st_size,
+            "sha256": file_sha256(bp),
+        }
+    atomic_save_json(data, bundle_path)
+    return bundle_path
 
 
 def rng_state_dict() -> Dict[str, Any]:
@@ -349,16 +416,27 @@ def restore_from_mirror(mirror_dir: Optional[str], run_subdir: str,
     src_dir = Path(mirror_dir) / run_subdir
     if not src_dir.is_dir():
         return []
-    from training.colab_recovery import restore_checkpoint, backup, reconcile_run, checkpoint_epoch
+    from training.colab_recovery import (
+        restore_checkpoint,
+        backup,
+        reconcile_run,
+        verify_bundle_best,
+    )
     restored: List[str] = []
-    names = ("last.pt", "best.pt", "results.csv", "epochs.jsonl", "train.log", "run_manifest.json")
+    names = ("last.pt", "best.pt", "results.csv", "epochs.jsonl", "train.log", "run_manifest.json", "bundle_manifest.json")
     names += tuple(p.name for p in src_dir.glob("eval_*.json"))
+    best_verified = verify_bundle_best(src_dir)
     for name in names:
-        src=src_dir/name
+        src = src_dir / name
         if not src.is_file():
             continue
-        dst=Path(run_path)/"weights"/name if name.endswith(".pt") else Path(run_path)/name
-        if name=="best.pt":continue  # recovery uses last without atomic bundle proof
+        dst = Path(run_path) / "weights" / name if name.endswith(".pt") else Path(run_path) / name
+        if name == "best.pt":
+            if not best_verified:
+                continue  # unverified legacy best without bundle_manifest proof cannot win (F13)
+            if restore_checkpoint(src, dst):
+                restored.append(name)
+            continue
         if name.endswith(".pt"):
             if restore_checkpoint(src,dst):restored.append(name)
             continue

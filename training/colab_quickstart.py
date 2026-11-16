@@ -10,10 +10,10 @@ Usage (one Colab cell; re-run the SAME cell after a preemption):
     !python training/colab_quickstart.py --models lsknet --datasets codrone
     !python training/colab_quickstart.py --recover-only  # restore, do not launch
 
-Recovery (C7): on every start the mirror (default
-/content/drive/MyDrive/object-detection/runs_v4) is inspected; pipeline_state.json
-and every surviving last.pt/best.pt/results.csv are restored into
-<runs-dir>/train/<dataset>_<model>/ (never overwriting local files). When no
+Recovery (C7/F13): on every start the mirror (default
+/content/drive/MyDrive/object-detection/runs_v4) is inspected; pipeline_state.json,
+verified last.pt, bundle-verified best.pt (when bundle_manifest.json proves its
+SHA-256), and results.csv are restored into <runs-dir>/train/<dataset>_<model>/.
 --models/--datasets are given and a restored queue exists, the SAME queue is
 relaunched, so finished jobs are skipped and the interrupted job resumes from
 its last mirrored epoch. A preemption therefore loses at most the epochs since

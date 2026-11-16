@@ -59,16 +59,23 @@ MODEL_REGISTRY: Dict[str, Type[BaseOBBDetector]] = {
     "lsknet": LSKNetDetector,
     "lsk-net": LSKNetDetector,
 
-    # 10. YOLO11-OBB (Ultralytics 2024)
+    # 10. Local compact YOLO11-style dense net vs Ultralytics YOLO11-OBB family
     "yolo11-obb": YOLO11OBBDetector,
-    "yolo11n-obb": YOLO11OBBDetector,
-    "yolo11m-obb": YOLO11OBBDetector,
+    "yolo11n-obb": YoloOBBDetector,
+    "yolo11s-obb": YoloOBBDetector,
+    "yolo11m-obb": YoloOBBDetector,
+    "yolo11l-obb": YoloOBBDetector,
 
-    # Foundational Baselines
+    # Foundational Baselines & Ultralytics YOLO family
     "custom-obb": CustomOBBDetector,
     "yolov8n-obb": YoloOBBDetector,
     "yolov8s-obb": YoloOBBDetector,
     "yolov8m-obb": YoloOBBDetector,
+    "yolov8l-obb": YoloOBBDetector,
+    "yolo26n-obb": YoloOBBDetector,
+    "yolo26s-obb": YoloOBBDetector,
+    "yolo26m-obb": YoloOBBDetector,
+    "yolo26l-obb": YoloOBBDetector,
 }
 
 
@@ -102,8 +109,8 @@ def get_model(
         if accepts_num_classes:
             ctor_kwargs["num_classes"] = num_classes
         detector = detector_cls(**ctor_kwargs)
-    elif "yolo11" in m_lower:
-        detector = YOLO11OBBDetector(model_name=m_lower, device=device, num_classes=num_classes)
+    elif m_lower in ("yolo11-obb", "yolo11_obb"):
+        detector = YOLO11OBBDetector(model_name="yolo11-obb", device=device, num_classes=num_classes)
     elif "yolo" in m_lower:
         detector = YoloOBBDetector(model_name=m_lower, device=device)
     elif "custom" in m_lower:

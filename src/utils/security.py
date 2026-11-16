@@ -8,6 +8,8 @@ from __future__ import annotations
 import os
 import signal
 import sys
+import tarfile
+import zipfile
 from pathlib import Path
 from typing import Any, Callable, Optional, Union
 
@@ -92,6 +94,62 @@ def safe_torch_load(
     except TypeError:
         # Fallback for older PyTorch versions that do not take weights_only argument
         return torch.load(resolved_path, map_location=map_location)
+
+
+def safe_load_checkpoint(
+    filepath: Union[Path, str],
+    map_location: Optional[Union[str, Any]] = None,
+    allow_unsafe_legacy: bool = False,
+) -> Any:
+    """Load checkpoint trying `weights_only=True` first; fallback only when opted in."""
+    try:
+        return safe_torch_load(filepath, map_location=map_location, weights_only=True)
+    except Exception as exc:
+        if not allow_unsafe_legacy:
+            raise RuntimeError(
+                f"Refusing unsafe pickle deserialization for '{filepath}': {exc}"
+            ) from exc
+        return safe_torch_load(filepath, map_location=map_location, weights_only=False)
+
+
+def _validate_archive_relpath(dest: Path, member_name: str) -> Path:
+    """Resolve a member path safely inside `dest`, blocking traversal and links."""
+    norm = member_name.replace("\\", "/")
+    if not norm or norm.startswith("/") or "\0" in norm:
+        raise ValueError(f"Unsafe archive member path: {member_name!r}")
+    parts = [p for p in norm.split("/") if p not in ("", ".")]
+    if any(p == ".." for p in parts):
+        raise ValueError(f"Path traversal blocked in archive member: {member_name!r}")
+    dest_root = dest.resolve()
+    target = dest_root.joinpath(*parts) if parts else dest_root
+    target_resolved = target.resolve()
+    target_resolved.relative_to(dest_root)
+    return target
+
+
+def validate_tar_archive(archive_path: Union[Path, str], dest: Union[Path, str]) -> None:
+    """Reject traversal, escaping paths, and symlinks/hardlinks/special files in tar."""
+    dest_path = Path(dest)
+    with tarfile.open(archive_path, "r:*") as tf:
+        for member in tf.getmembers():
+            _validate_archive_relpath(dest_path, member.name)
+            if member.issym() or member.islnk():
+                raise ValueError(f"Refusing link member in archive: {member.name!r}")
+            if not (member.isdir() or member.isreg()):
+                raise ValueError(f"Refusing special file member in archive: {member.name!r}")
+
+
+def validate_zip_archive(archive_path: Union[Path, str], dest: Union[Path, str]) -> None:
+    """Reject traversal, symlinks, and escaping paths in zip archives."""
+    import stat
+
+    dest_path = Path(dest)
+    with zipfile.ZipFile(archive_path, "r") as zf:
+        for info in zf.infolist():
+            _validate_archive_relpath(dest_path, info.filename)
+            mode = (info.external_attr >> 16) & 0o170000
+            if stat.S_ISLNK(mode):
+                raise ValueError(f"Refusing symlink member in zip: {info.filename!r}")
 
 
 def _signal_handler(signum: int, frame: Any) -> None:

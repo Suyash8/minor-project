@@ -34,7 +34,35 @@ DEFAULT_MIRROR_DIR = "/content/drive/MyDrive/object-detection/runs_v4"
 STATE_FILENAME = "pipeline_state.json"
 KNOWN_DATASETS = ("visdrone", "codrone", "dota", "mock", "all")
 _FILES = ("last.pt", "best.pt", "results.csv", "epochs.jsonl", "train.log",
-          "run_manifest.json")
+          "run_manifest.json", "bundle_manifest.json")
+
+
+def _sha256_file(path: Path) -> str:
+    import hashlib
+    hasher = hashlib.sha256()
+    with path.open("rb") as f:
+        for block in iter(lambda: f.read(1024 * 1024), b""):
+            hasher.update(block)
+    return hasher.hexdigest()
+
+
+def verify_bundle_best(src_dir: Path, best_path: Optional[Path] = None) -> bool:
+    """True only when mirror `bundle_manifest.json` cryptographically binds `best.pt` (F13)."""
+    src_dir = Path(src_dir)
+    bundle_p = src_dir / "bundle_manifest.json"
+    best_p = Path(best_path) if best_path is not None else (src_dir / "best.pt")
+    if not bundle_p.is_file() or not best_p.is_file():
+        return False
+    try:
+        meta = json.loads(bundle_p.read_text())
+        entry = meta.get("best") or {}
+        expected_sz = int(entry.get("checkpoint_size", -1))
+        expected_sha = str(entry.get("sha256", ""))
+        if expected_sz <= 0 or not expected_sha:
+            return False
+        return best_p.stat().st_size == expected_sz and _sha256_file(best_p) == expected_sha
+    except (OSError, ValueError, TypeError):
+        return False
 
 
 def _atomic_copy(src: Path, dst: Path) -> None:
@@ -125,17 +153,16 @@ def restore_checkpoint(src,dst):
 
 
 def reconcile_run(src_dir,run_dir,last_advanced,restored_files=()):
-    """Keep best from the winning mirror bundle; invalidate unbound evals.
+    """Keep best when cryptographically verified by bundle_manifest.json; invalidate unbound evals.
 
-    Existing evals lack a cryptographic weight binding, so no restored eval is
-    safe to reuse solely because its mtime is newer. Keep bytes as a backup
-    and mark them non-comparable until evaluation is rerun.
+    Without a bundle_manifest binding best.pt, an async best cannot be proven
+    consistent with the winning last checkpoint, so stale unverified best.pt is
+    backed up and removed; verified bundle best.pt is preserved cleanly (F13).
     """
     src_dir,run_dir=Path(src_dir),Path(run_dir)
     best=run_dir/"weights/best.pt"
-    if last_advanced and best.exists():
-        # Even a verified older best cannot prove the latest best upload landed.
-        # No transactional bundle manifest exists: use selected last safely.
+    bundle_root = run_dir if (run_dir / "bundle_manifest.json").is_file() else src_dir
+    if last_advanced and best.exists() and not verify_bundle_best(bundle_root, best_path=best):
         backup(best);best.unlink()
     for ev in run_dir.glob("eval_*.json"):
         if not last_advanced and ev.name not in restored_files:continue
@@ -205,6 +232,7 @@ def recover(mirror_dir: Optional[str], runs_dir: str,
         ds, model = parsed
         run_dir = runs / "train" / sub.name
         got: List[str] = []
+        best_verified = verify_bundle_best(sub)
         for fn in _FILES + tuple(x.name for x in sub.glob("eval_*.json")) + tuple(x.name for x in sub.glob("*.progress.json")):
             src = sub / fn
             if not src.is_file():
@@ -212,8 +240,12 @@ def recover(mirror_dir: Optional[str], runs_dir: str,
             if fn.endswith(".progress.json"):
                 continue # restored atomically with the selected checkpoint
             dst = (run_dir / "weights" / fn if fn.endswith(".pt") else run_dir / fn)
-            if fn=="best.pt":
-                continue  # async legacy best has no trustworthy provenance
+            if fn == "best.pt":
+                if not best_verified:
+                    continue  # async legacy best without bundle_manifest proof cannot win (F13)
+                _atomic_copy(src, dst)
+                got.append(fn)
+                continue
             if fn.endswith(".pt"):
                 if restore_checkpoint(src,dst):
                     got.append(fn)

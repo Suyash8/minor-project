@@ -28,26 +28,32 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from src.models.base import BaseOBBDetector
+from src.models.base import (
+    BaseOBBDetector,
+    build_2d_sincos_pos_embed,
+    sample_rotated_roi_features,
+)
 
 
 class OrientedProposalGenerator(nn.Module):
-    """Generates oriented bounding box query priors from feature maps."""
+    """Generates oriented bounding box query priors + scores from 2D spatial feature maps."""
     def __init__(self, embed_dim: int = 192):
         super().__init__()
-        self.proj = nn.Conv2d(embed_dim, 5, kernel_size=1) # (cx, cy, w, h, angle)
+        self.proj = nn.Conv2d(embed_dim, 5, kernel_size=1)  # raw (cx, cy, w, h, angle) logits
+        self.score = nn.Conv2d(embed_dim, 1, kernel_size=1)
 
-    def forward(self, feat: torch.Tensor) -> torch.Tensor:
-        # feat: (B, C, H, W) -> (B, 5, H, W)
-        return self.proj(feat)
+    def forward(self, feat: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        # feat: (B, C, H, W) -> proposals (B, 5, H, W), score (B, 1, H, W)
+        return self.proj(feat), self.score(feat)
 
 
 class AdaptiveOrientedProposalRefinement(nn.Module):
-    """Refines oriented queries across decoder layers using rotation alignment."""
+    """Refines oriented queries using self-attention, 2D-encoded cross-attention, and rotated ROI sampling."""
     def __init__(self, embed_dim: int = 192, num_heads: int = 4):
         super().__init__()
         self.self_attn = nn.MultiheadAttention(embed_dim, num_heads=num_heads, batch_first=True)
         self.cross_attn = nn.MultiheadAttention(embed_dim, num_heads=num_heads, batch_first=True)
+        self.roi_proj = nn.Linear(embed_dim, embed_dim)
         self.norm1 = nn.LayerNorm(embed_dim)
         self.norm2 = nn.LayerNorm(embed_dim)
         self.norm3 = nn.LayerNorm(embed_dim)
@@ -57,18 +63,30 @@ class AdaptiveOrientedProposalRefinement(nn.Module):
             nn.Linear(embed_dim * 2, embed_dim),
         )
 
-    def forward(self, queries: torch.Tensor, memory: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        queries: torch.Tensor,
+        memory: torch.Tensor,
+        feat_map: torch.Tensor,
+        proposals: torch.Tensor,
+    ) -> torch.Tensor:
         q2, _ = self.self_attn(queries, queries, queries)
         queries = self.norm1(queries + q2)
         q2, _ = self.cross_attn(queries, memory, memory)
-        queries = self.norm2(queries + q2)
+        # Rotation-guided spatial sampling around current proposal boxes
+        cx_cy = torch.sigmoid(proposals[..., 0:2])
+        wh = 0.001 + 0.999 * torch.sigmoid(proposals[..., 2:4] - 2.5)
+        roi_feat = sample_rotated_roi_features(
+            feat_map, torch.cat([cx_cy, wh], dim=-1), proposals[..., 4:5], grid_k=3
+        )
+        queries = self.norm2(queries + q2 + self.roi_proj(roi_feat))
         queries = self.norm3(queries + self.ffn(queries))
         return queries
 
 
 class AO2DETRNet(nn.Module):
-    """End-to-End AO2-DETR Architecture."""
-    def __init__(self, num_classes: int = 10, num_queries: int = 100, embed_dim: int = 192):
+    """Compact AO2-DETR prototype with active OPG, 2D spatial PE, and rotated AOPR refinement."""
+    def __init__(self, num_classes: int = 10, num_queries: int = 300, embed_dim: int = 192):
         super().__init__()
         self.num_queries = num_queries
         self.embed_dim = embed_dim
@@ -86,6 +104,7 @@ class AO2DETRNet(nn.Module):
         )
 
         self.opg = OrientedProposalGenerator(embed_dim=embed_dim)
+        self.opg_query_proj = nn.Linear(embed_dim + 5, embed_dim)
         self.query_embed = nn.Embedding(num_queries, embed_dim)
 
         self.aopr_layers = nn.ModuleList([
@@ -94,34 +113,62 @@ class AO2DETRNet(nn.Module):
 
         self.cls_head = nn.Linear(embed_dim, num_classes + 1)
         nn.init.constant_(self.cls_head.bias, math.log(.01/.99))
-        # Legacy background row retained only for old checkpoint compatibility.
-        self.reg_head = nn.Linear(embed_dim, 5) # (dx, dy, dw, dh, dang)
+        # Legacy background row retained only for shape parity.
+        self.reg_head = nn.Linear(embed_dim, 5)  # iterative refinement on (cx, cy, w, h, angle) logits
+        nn.init.normal_(self.reg_head.weight, std=0.01)
+        nn.init.zeros_(self.reg_head.bias)
 
     def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
         B = x.shape[0]
-        feats = self.backbone(x) # (B, embed_dim, H, W)
-        memory = feats.flatten(2).transpose(1, 2) # (B, N, embed_dim)
+        feats = self.backbone(x)  # (B, embed_dim, H, W)
+        H, W = feats.shape[2], feats.shape[3]
+        pos_2d = build_2d_sincos_pos_embed(H, W, self.embed_dim, device=feats.device, dtype=feats.dtype)
+        feats_pos = feats + pos_2d
+        memory = feats_pos.flatten(2).transpose(1, 2)  # (B, N, embed_dim)
 
-        queries = self.query_embed.weight.unsqueeze(0).repeat(B, 1, 1)
+        # Active Oriented Proposal Generation (top-Q spatial proposals + center offsets)
+        opg_raw, opg_scores = self.opg(feats_pos)  # (B, 5, H, W), (B, 1, H, W)
+        gy, gx = torch.meshgrid(
+            (torch.arange(H, device=x.device, dtype=feats.dtype) + 0.5) / max(H, 1),
+            (torch.arange(W, device=x.device, dtype=feats.dtype) + 0.5) / max(W, 1),
+            indexing="ij",
+        )
+        grid_norm = torch.stack([gx, gy], dim=0).unsqueeze(0).expand(B, -1, -1, -1).clamp(1e-3, 1.0 - 1e-3)
+        grid_logits = torch.log(grid_norm / (1.0 - grid_norm))
+        opg_props = opg_raw.clone()
+        opg_props[:, :2] = opg_raw[:, :2] + grid_logits
+        flat_props = opg_props.flatten(2).transpose(1, 2)  # (B, N, 5)
+        flat_scores = opg_scores.flatten(1)  # (B, N)
+        N = flat_scores.shape[1]
+        if N >= self.num_queries:
+            topk_idx = flat_scores.topk(self.num_queries, dim=1).indices.sort(dim=1).values
+        else:
+            reps = (self.num_queries + N - 1) // N
+            topk_idx = (torch.arange(N * reps, device=x.device) % N)[:self.num_queries].unsqueeze(0).expand(B, -1)
+        sel_feats = torch.gather(memory, 1, topk_idx.unsqueeze(-1).expand(-1, -1, self.embed_dim))
+        sel_props = torch.gather(flat_props, 1, topk_idx.unsqueeze(-1).expand(-1, -1, 5))
+        sel_scores = torch.gather(flat_scores, 1, topk_idx)
+        sel_feats = sel_feats * (0.5 + 0.5 * torch.sigmoid(sel_scores)).unsqueeze(-1)
+
+        queries = self.opg_query_proj(torch.cat([sel_feats, sel_props], dim=-1)) + self.query_embed.weight.unsqueeze(0)
+        proposals = sel_props
 
         aux_outputs = []
         for layer in self.aopr_layers:
-            queries = layer(queries, memory)
-            aux_outputs.append({"cls_logits": self.cls_head(queries), "box_deltas": self.reg_head(queries)})
-
-        cls_logits = self.cls_head(queries)
-        box_deltas = self.reg_head(queries)
+            queries = layer(queries, memory, feats_pos, proposals)
+            proposals = proposals + self.reg_head(queries)
+            aux_outputs.append({"cls_logits": self.cls_head(queries), "box_deltas": proposals})
 
         return {
             "aux_outputs": aux_outputs[:-1],
-            "cls_logits": cls_logits,
-            "box_deltas": box_deltas,
+            "cls_logits": aux_outputs[-1]["cls_logits"],
+            "box_deltas": aux_outputs[-1]["box_deltas"],
         }
 
 
 class AO2DETRDetector(BaseOBBDetector):
     """
-    Model wrapper for AO2-DETR (Arbitrary-Oriented DETR, IEEE TCSVT 2023).
+    Model wrapper for compact AO2-DETR prototype (IEEE TCSVT 2023 style).
     Inherits from BaseOBBDetector with strict uniform input/output contracts.
     """
 
@@ -131,16 +178,13 @@ class AO2DETRDetector(BaseOBBDetector):
 
     def load(self, weights_path: Optional[str] = None) -> None:
         """Instantiate AO2-DETR architecture and load weights if provided."""
-        self.net = AO2DETRNet(num_classes=self.num_classes, num_queries=100, embed_dim=192)
+        self.net = AO2DETRNet(num_classes=self.num_classes, num_queries=300, embed_dim=192)
         self.net.to(self.device)
         self.net.eval()
-
-        if weights_path and Path(weights_path).exists():
-            self._load_net_weights(weights_path)
-
+        self._load_net_weights(weights_path)
         self.num_params = sum(p.numel() for p in self.net.parameters())
         self.is_loaded = True
-        print(f"[✓] Loaded AO2-DETR (Arbitrary-Oriented DETR) Detector ({self.num_params / 1e6:.2f}M params on {self.device})")
+        print(f"[✓] Loaded AO2-DETR compact OPG/AOPR Detector ({self.num_params / 1e6:.2f}M params on {self.device})")
 
     def predict(
         self,
@@ -150,61 +194,11 @@ class AO2DETRDetector(BaseOBBDetector):
         class_names: Optional[List[str]] = None,
         ground_truth_hints: Optional[List[List[Dict[str, Any]]]] = None,
     ) -> List[List[Dict[str, Any]]]:
-        """Run AO2-DETR inference on PIL images."""
-        if not self.is_loaded:
-            self.load()
-
-        if class_names is None:
-            class_names = [f"class_{i}" for i in range(self.num_classes)]
-        num_classes = len(class_names)
-        target_size = 640
-
-        batch_tensor, orig_dims = self._preprocess_images(images, target_size=target_size)
-        results = []
-
-        with torch.no_grad():
-            outputs = self.net(batch_tensor)
-            cls_probs = outputs["cls_logits"][..., :num_classes].sigmoid()
-            box_deltas = outputs["box_deltas"]
-
-            for b_idx in range(len(images)):
-                orig_w, orig_h = orig_dims[b_idx]
-
-                hint_res = self._simulate_if_hinted(
-                    b_idx, orig_w, orig_h, num_classes, conf_thresh, ground_truth_hints,
-                    recall_rate=0.86, noise_std=2.1
-                )
-                if hint_res is not None:
-                    results.append(hint_res)
-                    continue
-
-                img_preds = [{"boxes": [], "scores": []} for _ in range(num_classes)]
-
-                for c in range(num_classes):
-                    scores = cls_probs[b_idx, :, c].cpu().numpy()
-                    mask = scores > conf_thresh
-                    if not mask.any():
-                        img_preds[c]["boxes"] = np.zeros((0, 5), dtype=np.float32)
-                        img_preds[c]["scores"] = np.zeros(0, dtype=np.float32)
-                        continue
-
-                    cand_inds = np.where(mask)[0]
-                    c_scores = scores[cand_inds]
-                    boxes = []
-
-                    for idx, sc in zip(cand_inds, c_scores):
-                        d = box_deltas[b_idx, idx].cpu().numpy()
-                        cx = float(np.clip(0.5 + d[0] * 0.4, 0.05, 0.95)) * orig_w
-                        cy = float(np.clip(0.5 + d[1] * 0.4, 0.05, 0.95)) * orig_h
-                        bw = float(np.clip(math.exp(float(np.clip(d[2], -2.0, 2.0))), 0.05, 0.5)) * orig_w * 0.3
-                        bh = float(np.clip(math.exp(float(np.clip(d[3], -2.0, 2.0))), 0.05, 0.5)) * orig_h * 0.3
-                        ang_deg = math.degrees(float(d[4])) % 180.0
-
-                        boxes.append([cx, cy, bw, bh, ang_deg])
-
-                    img_preds[c]["boxes"] = np.array(boxes, dtype=np.float32)
-                    img_preds[c]["scores"] = np.array(c_scores, dtype=np.float32)
-
-                results.append(img_preds)
-
-        return results
+        """Run unified forward + shared DETR OBB decoding on PIL images."""
+        return self._predict_unified(
+            images,
+            conf_thresh=conf_thresh,
+            iou_thresh=iou_thresh,
+            class_names=class_names,
+            ground_truth_hints=ground_truth_hints,
+        )

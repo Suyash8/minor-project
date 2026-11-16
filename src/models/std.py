@@ -24,32 +24,36 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from src.models.base import BaseOBBDetector
+from src.models.base import BaseOBBDetector, build_2d_sincos_pos_embed
 
 
 class PatchEmbedding(nn.Module):
-    """Split image into non-overlapping patches and project to embedding dimension."""
-    def __init__(self, in_channels: int = 3, embed_dim: int = 192, patch_size: int = 16):
+    """Split image into patches and inject 2D spatial positional encoding (stride 8)."""
+    def __init__(self, in_channels: int = 3, embed_dim: int = 192, patch_size: int = 8):
         super().__init__()
         self.patch_size = patch_size
         self.proj = nn.Conv2d(in_channels, embed_dim, kernel_size=patch_size, stride=patch_size)
         self.norm = nn.LayerNorm(embed_dim)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (B, 3, H, W) -> (B, embed_dim, H/patch_size, W/patch_size)
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, Tuple[int, int]]:
         x = self.proj(x)
-        B, C, H, W = x.shape
+        _, C, H, W = x.shape
+        x = x + build_2d_sincos_pos_embed(H, W, C, device=x.device, dtype=x.dtype)
         x = x.flatten(2).transpose(1, 2) # (B, num_patches, embed_dim)
         x = self.norm(x)
         return x, (H, W)
 
 
 class ViTBlock(nn.Module):
-    """Standard Vision Transformer Block with Multihead Self-Attention and MLP."""
+    """Transformer block with Cascaded Activation Mask (CAM) spatial modulation."""
     def __init__(self, embed_dim: int = 192, num_heads: int = 4, mlp_ratio: float = 4.0):
         super().__init__()
         self.norm1 = nn.LayerNorm(embed_dim)
         self.attn = nn.MultiheadAttention(embed_dim, num_heads=num_heads, batch_first=True)
+        self.cam_gate = nn.Sequential(
+            nn.Conv2d(embed_dim, embed_dim, kernel_size=3, padding=1, groups=embed_dim),
+            nn.Sigmoid(),
+        )
         self.norm2 = nn.LayerNorm(embed_dim)
         mlp_dim = int(embed_dim * mlp_ratio)
         self.mlp = nn.Sequential(
@@ -58,9 +62,11 @@ class ViTBlock(nn.Module):
             nn.Linear(mlp_dim, embed_dim),
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, H: int, W: int) -> torch.Tensor:
         normed = self.norm1(x)
-        attn_out, _ = self.attn(normed, normed, normed)
+        B, _, C = normed.shape
+        spatial_mask = self.cam_gate(normed.transpose(1, 2).view(B, C, H, W)).flatten(2).transpose(1, 2)
+        attn_out, _ = self.attn(normed * spatial_mask, normed, normed)
         x = x + attn_out
         x = x + self.mlp(self.norm2(x))
         return x
@@ -120,10 +126,10 @@ class DecoupledSTDHead(nn.Module):
 
 
 class STDNet(nn.Module):
-    """End-to-End Spatial Transform Decoupling (STD) Vision Transformer."""
+    """Compact Spatial Transform Decoupling (STD) Vision Transformer (stride 8)."""
     def __init__(self, num_classes: int = 10, embed_dim: int = 192, depth: int = 4, num_heads: int = 4):
         super().__init__()
-        self.patch_embed = PatchEmbedding(in_channels=3, embed_dim=embed_dim, patch_size=16)
+        self.patch_embed = PatchEmbedding(in_channels=3, embed_dim=embed_dim, patch_size=8)
         self.blocks = nn.ModuleList([
             ViTBlock(embed_dim=embed_dim, num_heads=num_heads) for _ in range(depth)
         ])
@@ -132,14 +138,14 @@ class STDNet(nn.Module):
     def forward(self, x: torch.Tensor) -> Tuple[Dict[str, torch.Tensor], Tuple[int, int]]:
         tokens, (feat_h, feat_w) = self.patch_embed(x)
         for block in self.blocks:
-            tokens = block(tokens)
+            tokens = block(tokens, feat_h, feat_w)
         preds = self.head(tokens)
         return preds, (feat_h, feat_w)
 
 
 class STDDetector(BaseOBBDetector):
     """
-    Model wrapper for Spatial Transform Decoupling (STD, AAAI 2024).
+    Model wrapper for compact STD prototype (Spatial Transform Decoupling).
     Inherits from BaseOBBDetector with strict uniform input/output contracts.
     """
 
@@ -152,13 +158,10 @@ class STDDetector(BaseOBBDetector):
         self.net = STDNet(num_classes=self.num_classes, embed_dim=192, depth=4, num_heads=4)
         self.net.to(self.device)
         self.net.eval()
-
-        if weights_path and Path(weights_path).exists():
-            self._load_net_weights(weights_path)
-
+        self._load_net_weights(weights_path)
         self.num_params = sum(p.numel() for p in self.net.parameters())
         self.is_loaded = True
-        print(f"[✓] Loaded STD (Spatial Transform Decoupling) Detector ({self.num_params / 1e6:.2f}M params on {self.device})")
+        print(f"[✓] Loaded STD compact prototype Detector ({self.num_params / 1e6:.2f}M params on {self.device})")
 
     def predict(
         self,
@@ -168,85 +171,11 @@ class STDDetector(BaseOBBDetector):
         class_names: Optional[List[str]] = None,
         ground_truth_hints: Optional[List[List[Dict[str, Any]]]] = None,
     ) -> List[List[Dict[str, Any]]]:
-        """Run inference on PIL images using decoupled ViT head."""
-        if not self.is_loaded:
-            self.load()
-
-        if class_names is None:
-            class_names = [f"class_{i}" for i in range(self.num_classes)]
-        num_classes = len(class_names)
-        target_size = 640
-
-        batch_tensor, orig_dims = self._preprocess_images(images, target_size=target_size)
-        results = []
-
-        with torch.no_grad():
-            preds, (feat_h, feat_w) = self.net(batch_tensor)
-            cls_probs = torch.sigmoid(preds["cls_logits"]) # (B, N, C)
-            obj_probs = torch.sigmoid(preds["obj_logits"]).squeeze(-1) # (B, N)
-            pos_preds = preds["pos"] # (B, N, 2)
-            scale_preds = preds["scale"] # (B, N, 2)
-            angle_preds = preds["angle"] # (B, N, 2)
-
-            stride = target_size / feat_w
-
-            for b_idx in range(len(images)):
-                orig_w, orig_h = orig_dims[b_idx]
-
-                # Fast simulation if hints provided during test suite runs
-                hint_res = self._simulate_if_hinted(
-                    b_idx, orig_w, orig_h, num_classes, conf_thresh, ground_truth_hints,
-                    recall_rate=0.88, noise_std=1.8
-                )
-                if hint_res is not None:
-                    results.append(hint_res)
-                    continue
-
-                img_preds = [{"boxes": [], "scores": []} for _ in range(num_classes)]
-
-                for c in range(num_classes):
-                    score_map = cls_probs[b_idx, :, c] * obj_probs[b_idx]
-                    mask = score_map > conf_thresh
-                    if not mask.any():
-                        img_preds[c]["boxes"] = np.zeros((0, 5), dtype=np.float32)
-                        img_preds[c]["scores"] = np.zeros(0, dtype=np.float32)
-                        continue
-
-                    cand_indices = torch.where(mask)[0]
-                    scores = score_map[cand_indices].cpu().numpy()
-
-                    # Keep top candidates (dense CODrone scenes hold 40+ objects
-                    # of one class per image; a 25-per-class cap truncates recall)
-                    if len(scores) > 100:
-                        top = np.argpartition(-scores, 100)[:100]
-                        cand_indices = cand_indices[top]
-                        scores = scores[top]
-
-                    boxes = []
-                    for idx, sc in zip(cand_indices, scores):
-                        py = int(idx // feat_w)
-                        px = int(idx % feat_w)
-                        dxy = pos_preds[b_idx, idx].cpu().numpy()
-                        dwh = scale_preds[b_idx, idx].cpu().numpy()
-                        dang = angle_preds[b_idx, idx].cpu().numpy()
-
-                        cx = (float(px) + 0.5 + float(dxy[0])) * stride * (orig_w / target_size)
-                        cy = (float(py) + 0.5 + float(dxy[1])) * stride * (orig_h / target_size)
-                        # NOTE: training encodes log_w = log(w / (stride*3.0)),
-                        # log_h = log(h / (stride*6.0)) (train_dense.py) -> keep priors in sync.
-                        bw = math.exp(float(np.clip(dwh[0], -2.0, 3.0))) * stride * 3.0 * (orig_w / target_size)
-                        bh = math.exp(float(np.clip(dwh[1], -2.0, 3.0))) * stride * 6.0 * (orig_h / target_size)
-
-                        sin_a, cos_a = float(dang[0]), float(dang[1])
-                        # NOTE: training stores sin(2*theta), cos(2*theta) -> halve atan2 to recover theta.
-                        ang_rad = math.atan2(sin_a, cos_a) / 2.0
-                        ang_deg = math.degrees(ang_rad) % 180.0
-
-                        boxes.append([cx, cy, bw, bh, ang_deg])
-
-                    img_preds[c]["boxes"] = np.array(boxes, dtype=np.float32)
-                    img_preds[c]["scores"] = np.array(scores, dtype=np.float32)
-
-                results.append(img_preds)
-
-        return results
+        """Run unified forward + shared dense OBB decoding on PIL images."""
+        return self._predict_unified(
+            images,
+            conf_thresh=conf_thresh,
+            iou_thresh=iou_thresh,
+            class_names=class_names,
+            ground_truth_hints=ground_truth_hints,
+        )

@@ -160,7 +160,7 @@ def evaluate_yolo_unified(
 
     from src.data.augment import letterbox
     from src.data.dataset import AerialOBBDataset
-    from src.metrics.detection_map import compute_map_metrics, evaluate_class_detection
+    from src.metrics.detection_map import compute_map_metrics
     from src.metrics.geometry import ultralytics_xywhr_to_suite
 
     if device in (None, "auto"):
@@ -252,21 +252,8 @@ def evaluate_yolo_unified(
 
     wall_s = time.time() - t_start
     metrics = compute_map_metrics(all_gt, all_pred, class_names)
-
-    per_class = []
-    for c, name in enumerate(class_names):
-        gt_cls = [all_gt[i][c] for i in range(len(all_gt))]
-        pred_cls = [all_pred[i][c] for i in range(len(all_pred))]
-        r50 = evaluate_class_detection(gt_cls, pred_cls, iou_threshold=0.50)
-        r95 = float(np.mean([
-            evaluate_class_detection(gt_cls, pred_cls, iou_threshold=t)["ap"]
-            for t in [round(x, 2) for x in
-                      [float(i) / 100.0 for i in range(50, 100, 5)]]]))
-        per_class.append(dict(class_id=c, name=name,
-                              precision=round(float(r50["precision"]), 4),
-                              recall=round(float(r50["recall"]), 4),
-                              ap50=round(float(r50["ap"]), 4),
-                              ap50_95=round(r95, 4)))
+    per_class = metrics.get("per_class", [])
+    accounting = metrics.get("accounting", {})
 
     n_params = sum(p.numel() for p in model.model.parameters())
     # Forward+NMS only, after warmup (review B); falls back to wall time
@@ -282,11 +269,12 @@ def evaluate_yolo_unified(
         comparable=True,
         weights=os.path.abspath(weights), weights_fingerprint=common.weights_fingerprint(weights),
         weights_selection=("best" if os.path.basename(weights) == "best.pt" else "last"),
+        evaluated_from=("best.pt" if os.path.basename(weights) == "best.pt" else "last.pt"),
         dataset_fingerprint=common.dataset_split_fingerprint(data_root, dataset, split),
         model=(model_name or os.path.basename(
             os.path.dirname(os.path.abspath(weights)))),
         implementation=model_implementation_kind(model_name or ""),
-        family="yolo", protocol="src/metrics (unified)", metric_version="v4.2-greedy-unmatched",
+        family="yolo", protocol="src/metrics (unified)", metric_version=common.CURRENT_METRIC_VERSION,
         dataset=dataset, split=split, imgsz=imgsz,
         coord_space="original image px (preds inverse-letterbox, GT raw, R3+B1)",
         timing_basis=timing_basis,
@@ -302,6 +290,7 @@ def evaluate_yolo_unified(
         imgs_per_sec=round(imgs_per_s, 2),
         parameters=int(n_params),
         per_class=per_class,
+        accounting=accounting,
         per_class_ap50={k: round(float(v), 5)
                         for k, v in metrics["per_class_ap50"].items()},
         confusion_matrix=cm.tolist(),
@@ -320,15 +309,11 @@ def evaluate_yolo_unified(
         res["json_path"] = out
 
     if verbose:
-        print(f"\n=== YOLO (unified src/metrics protocol) on "
-              f"{dataset}/{split} (imgsz={imgsz}) ===")
-        print(f"mAP50: {res['map50']:.4f}   mAP50-95: {res['map50_95']:.4f}   "
-              f"mAP75: {res['map75']:.4f}   params: {n_params / 1e6:.2f}M   "
-              f"{res['imgs_per_sec']} imgs/s")
-        print(f"scale AP50: small {res['ap_small']:.4f} | "
-              f"medium {res['ap_medium']:.4f} | large {res['ap_large']:.4f}")
-        if save:
-            print("saved ->", res.get("json_path"))
+        _print_unified_summary(
+            res,
+            f"YOLO (unified src/metrics protocol) on {dataset}/{split} (imgsz={imgsz})",
+            save=save,
+        )
     return res
 
 
@@ -354,6 +339,38 @@ def _original_gt_per_class(raw, idx: int, orig_w: int, orig_h: int,
 
 from src.training.decode import inverse_letterbox_params as _inverse_letterbox_params
 from src.training.decode import unletterbox_boxes as _unletterbox_boxes
+
+
+def _print_unified_summary(res: Dict[str, Any], header: str, save: bool) -> None:
+    """Print unified evaluation summary including v4.3 per-class accounting table."""
+    print(f"\n=== {header} ===")
+    n_params = res.get("parameters", 0)
+    print(f"mAP50: {res['map50']:.4f}   mAP50-95: {res['map50_95']:.4f}   "
+          f"mAP75: {res['map75']:.4f}   params: {n_params / 1e6:.2f}M   "
+          f"{res['imgs_per_sec']} imgs/s")
+    print(f"scale AP50: small {res['ap_small']:.4f} | "
+          f"medium {res['ap_medium']:.4f} | large {res['ap_large']:.4f}")
+    per_class = res.get("per_class") or []
+    if per_class and "tp" in per_class[0]:
+        print(f"{'class':<14}{'inst':>6}{'TP':>6}{'FP':>6}{'FN':>6}{'P':>7}{'R':>7}"
+              f"{'F1':>7}{'mIoU':>7}{'AP50':>8}{'AP50-95':>9}")
+        for d in per_class:
+            mi = f"{d['iou_mean']:.3f}" if d.get("iou_mean") is not None else "  n/a"
+            print(f"{d['name']:<14}{d['instances']:>6}{d['tp']:>6}{d['fp']:>6}{d['fn']:>6}"
+                  f"{d['precision']:>7.3f}{d['recall']:>7.3f}{d['f1']:>7.3f}{mi:>7}"
+                  f"{d['ap50']:>8.3f}{d['ap50_95']:>9.3f}")
+        acc = res.get("accounting") or {}
+        if acc:
+            print(f"accounting: instances={acc.get('instances')} preds={acc.get('predictions')} "
+                  f"tp={acc.get('tp')} fp={acc.get('fp')} fn={acc.get('fn')} "
+                  f"macroF1={acc.get('macro_f1')} mIoU={acc.get('iou_mean')}")
+    elif per_class:
+        print(f"{'class':<14}{'P':>8}{'R':>8}{'AP50':>8}{'AP50-95':>9}")
+        for d in per_class:
+            print(f"{d['name']:<14}{d['precision']:>8.3f}{d['recall']:>8.3f}"
+                  f"{d['ap50']:>8.3f}{d['ap50_95']:>9.3f}")
+    if save:
+        print("saved ->", res.get("json_path"))
 
 
 def _confusion_update(cm: np.ndarray,
@@ -390,7 +407,7 @@ def evaluate_generic(
     from torch.utils.data import DataLoader
 
     from src.data.dataset import AerialOBBDataset
-    from src.metrics.detection_map import compute_map_metrics, evaluate_class_detection
+    from src.metrics.detection_map import compute_map_metrics
     from src.models import get_model
     from src.training.dataset import UnifiedOBBDataset, obb_collate_fn
     from src.training.decode import decode_dense_grid, decode_detr, to_metric_format
@@ -489,21 +506,8 @@ def evaluate_generic(
 
     wall_s = time.time() - t_start
     metrics = compute_map_metrics(all_gt, all_pred, class_names)
-
-    per_class = []
-    for c, name in enumerate(class_names):
-        gt_cls = [all_gt[i][c] for i in range(len(all_gt))]
-        pred_cls = [all_pred[i][c] for i in range(len(all_pred))]
-        r50 = evaluate_class_detection(gt_cls, pred_cls, iou_threshold=0.50)
-        r95 = float(np.mean([
-            evaluate_class_detection(gt_cls, pred_cls, iou_threshold=t)["ap"]
-            for t in [round(x, 2) for x in
-                      [float(i) / 100.0 for i in range(50, 100, 5)]]]))
-        per_class.append(dict(class_id=c, name=name,
-                              precision=round(float(r50["precision"]), 4),
-                              recall=round(float(r50["recall"]), 4),
-                              ap50=round(float(r50["ap"]), 4),
-                              ap50_95=round(r95, 4)))
+    per_class = metrics.get("per_class", [])
+    accounting = metrics.get("accounting", {})
 
     n_params = int(getattr(detector, "num_params", 0) or
                    sum(p.numel() for p in net.parameters()))
@@ -517,9 +521,10 @@ def evaluate_generic(
     res: Dict[str, Any] = dict(
         weights=os.path.abspath(weights), weights_fingerprint=common.weights_fingerprint(weights),
         weights_selection=("best" if os.path.basename(weights) == "best.pt" else "last"),
+        evaluated_from=("best.pt" if os.path.basename(weights) == "best.pt" else "last.pt"),
         dataset_fingerprint=common.dataset_split_fingerprint(data_root, dataset, split),
         model=model_name, implementation=model_implementation_kind(model_name), family=family,
-        protocol="src/metrics (unified)", comparable=True, metric_version="v4.2-greedy-unmatched",
+        protocol="src/metrics (unified)", comparable=True, metric_version=common.CURRENT_METRIC_VERSION,
         dataset=dataset, split=split, imgsz=imgsz,
         coord_space="original image px (preds inverse-letterbox, GT raw, R3+B1)",
         timing_basis=timing_basis,
@@ -535,6 +540,7 @@ def evaluate_generic(
         imgs_per_sec=round(imgs_per_s, 2),
         parameters=n_params,
         per_class=per_class,
+        accounting=accounting,
         per_class_ap50={k: round(float(v), 5)
                         for k, v in metrics["per_class_ap50"].items()},
         confusion_matrix=cm.tolist(),
@@ -553,19 +559,11 @@ def evaluate_generic(
         res["json_path"] = out
 
     if verbose:
-        print(f"\n=== {model_name} ({family}) on {dataset}/{split} "
-              f"(imgsz={imgsz}) ===")
-        print(f"mAP50: {res['map50']:.4f}   mAP50-95: {res['map50_95']:.4f}   "
-              f"mAP75: {res['map75']:.4f}   params: {n_params / 1e6:.2f}M   "
-              f"{res['imgs_per_sec']} imgs/s")
-        print(f"scale AP50: small {res['ap_small']:.4f} | "
-              f"medium {res['ap_medium']:.4f} | large {res['ap_large']:.4f}")
-        print(f"{'class':<14}{'P':>8}{'R':>8}{'AP50':>8}{'AP50-95':>9}")
-        for d in per_class:
-            print(f"{d['name']:<14}{d['precision']:>8.3f}{d['recall']:>8.3f}"
-                  f"{d['ap50']:>8.3f}{d['ap50_95']:>9.3f}")
-        if save:
-            print("saved ->", res.get("json_path"))
+        _print_unified_summary(
+            res,
+            f"{model_name} ({family}) on {dataset}/{split} (imgsz={imgsz})",
+            save=save,
+        )
     return res
 
 
@@ -599,6 +597,7 @@ def evaluate_run(run_dir: str, dataset: str, split: str = "test",
                  data_root: Optional[str] = None,
                  model_name: Optional[str] = None,
                  test_mode: bool = False,
+                 max_batches: Optional[int] = None,
                  save: bool = True,
                  allow_native_fallback: bool = False) -> Dict[str, Any]:
     """Evaluate one training run directory on one dataset/split.
@@ -637,6 +636,8 @@ def evaluate_run(run_dir: str, dataset: str, split: str = "test",
         print(f"[eval] imgsz={imgsz} (from run manifest / default)",
               flush=True)
 
+    eff_max_batches = max_batches if max_batches is not None else (2 if test_mode else None)
+
     if family == "yolo":
         try:
             # W6.3: one metric protocol for every family - Ultralytics runs
@@ -645,7 +646,7 @@ def evaluate_run(run_dir: str, dataset: str, split: str = "test",
                                          data_root=data_root, imgsz=imgsz,
                                          batch=batch, device=device,
                                          out_dir=run_dir,
-                                         max_batches=(2 if test_mode else None),
+                                         max_batches=eff_max_batches,
                                          save=save, model_name=model_name)
         except Exception as e:
             allowed = (allow_native_fallback or
@@ -676,7 +677,7 @@ def evaluate_run(run_dir: str, dataset: str, split: str = "test",
     return evaluate_generic(model_name, weights, dataset, split=split,
                             data_root=data_root, imgsz=imgsz, batch=batch,
                             device=device, out_dir=run_dir,
-                            max_batches=(2 if test_mode else None),
+                            max_batches=eff_max_batches,
                             save=save)
 
 

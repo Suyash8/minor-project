@@ -245,21 +245,27 @@ def human_bytes(n: int) -> str:
 
 CURRENT_COORD_SPACE_PREFIX = "original image px"
 # v4.2: the matching correction changed metric semantics; results without
-# this exact metric_version were produced by older semantics and must be
+# a compatible metric_version were produced by older semantics and must be
 # re-evaluated, never mixed in.
-CURRENT_METRIC_VERSION = "v4.2-greedy-unmatched"
+# v4.3: full-accounting extends per_class/accounting keys without changing
+# matching semantics, so both v4.2 and v4.3 share identical mAP semantics.
+CURRENT_METRIC_VERSION = "v4.3-full-accounting"
+COMPATIBLE_METRIC_VERSIONS = frozenset({
+    "v4.2-greedy-unmatched",
+    "v4.3-full-accounting",
+})
 
 
 def protocol_current(res: dict) -> bool:
     """True when an eval result JSON came from the CURRENT unified protocol:
     coord_space "original image px ..." (R3+B1: GT raw in original image
-    coordinates, preds inverse-letterboxed) AND metric_version ==
-    CURRENT_METRIC_VERSION (v4.2 matching semantics). Anything else is an
-    older, incompatible protocol - cross_eval, summarize_runs and the report
+    coordinates, preds inverse-letterboxed) AND metric_version in
+    COMPATIBLE_METRIC_VERSIONS (v4.2/v4.3 matching semantics). Anything else is
+    an older, incompatible protocol - cross_eval, summarize_runs and the report
     generator skip it with a warning ("re-run evaluation").
     """
     return (str(res.get("coord_space", "")).startswith(CURRENT_COORD_SPACE_PREFIX)
-            and res.get("metric_version") == CURRENT_METRIC_VERSION)
+            and res.get("metric_version") in COMPATIBLE_METRIC_VERSIONS)
 
 
 def count_instances(ds: str, data_root: str, split: str = "test") -> dict[str, int]:

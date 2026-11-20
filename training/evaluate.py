@@ -177,6 +177,15 @@ def evaluate_yolo_unified(
     indices = list(range(len(raw)))
     if max_batches is not None:
         indices = indices[: max_batches * max(batch, 1)]
+    total_imgs = len(indices)
+    total_batches = max(1, (total_imgs + max(1, batch) - 1) // max(1, batch))
+    log_interval = max(1, total_batches // 10)
+    if verbose:
+        print(
+            f"[eval] {model_name or 'yolo'} (yolo) on {dataset}/{split}: "
+            f"{total_imgs} imgs ({total_batches} batches, batch={batch}, imgsz={imgsz}, dev={device})",
+            flush=True,
+        )
 
     def _prep(idx):
         """Untimed data prep: image into letterboxed input space; GT stays
@@ -201,7 +210,7 @@ def evaluate_yolo_unified(
 
     # Batched inference (review B); only forward+NMS is timed, after one
     # warmup batch, so the number is comparable with dense/DETR latency.
-    for start in range(0, len(indices), max(1, batch)):
+    for b_idx, start in enumerate(range(0, len(indices), max(1, batch))):
         chunk = indices[start: start + max(1, batch)]
         prepped = [_prep(i) for i in chunk]
         lb_imgs = [p[0] for p in prepped]
@@ -247,6 +256,30 @@ def evaluate_yolo_unified(
             all_pred.append(pred_img)
             n_images += 1
 
+        if verbose and (b_idx % log_interval == 0 or b_idx == total_batches - 1):
+            dt = max(time.time() - t_start, 1e-6)
+            fps_now = n_images / dt
+            eta_s = max(0.0, total_imgs - n_images) / max(fps_now, 1e-6)
+            print(
+                f"\r  [eval][{model_name or 'yolo'}] Batch {b_idx + 1}/{total_batches} "
+                f"({(b_idx + 1) / total_batches * 100:.1f}%) | {n_images}/{total_imgs} imgs | "
+                f"{fps_now:.1f} imgs/s | ETA {eta_s:.0f}s   ",
+                end="",
+                flush=True,
+            )
+
+    n_params = sum(p.numel() for p in model.model.parameters())
+    del model
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    if verbose:
+        print(
+            f"\r  [eval][{model_name or 'yolo'}] Inference done: {n_images} imgs in "
+            f"{time.time() - t_start:.1f}s — computing confusion matrix & mAP...   ",
+            flush=True,
+        )
+
     for gt_img, pred_img in zip(all_gt, all_pred):
         _confusion_update(cm, gt_img, pred_img)
 
@@ -254,8 +287,6 @@ def evaluate_yolo_unified(
     metrics = compute_map_metrics(all_gt, all_pred, class_names)
     per_class = metrics.get("per_class", [])
     accounting = metrics.get("accounting", {})
-
-    n_params = sum(p.numel() for p in model.model.parameters())
     # Forward+NMS only, after warmup (review B); falls back to wall time
     # when the timed window is empty (single-batch eval).
     if timed_images > 0 and t_infer > 0:
@@ -443,7 +474,19 @@ def evaluate_generic(
     detector.load(weights_path=weights)
     net = detector.net.to(dev)
     net.eval()
+    n_params = int(getattr(detector, "num_params", 0) or
+                   sum(p.numel() for p in net.parameters()))
     amp = AmpContext(dev)
+
+    total_batches = len(loader) if max_batches is None else min(len(loader), max_batches)
+    total_imgs = len(ds) if max_batches is None else min(len(ds), max_batches * max(1, batch))
+    log_interval = max(1, total_batches // 10)
+    if verbose:
+        print(
+            f"[eval] {model_name} ({family}) on {dataset}/{split}: "
+            f"{total_imgs} imgs ({total_batches} batches, batch={batch}, imgsz={imgsz}, dev={dev})",
+            flush=True,
+        )
 
     all_gt: List[List[Dict[str, Any]]] = []
     all_pred: List[List[Dict[str, Any]]] = []
@@ -501,6 +544,29 @@ def evaluate_generic(
                 all_pred.append(pred_img)
             n_images += imgs.shape[0]
 
+            if verbose and (b_idx % log_interval == 0 or b_idx == total_batches - 1):
+                dt = max(time.time() - t_start, 1e-6)
+                fps_now = n_images / dt
+                eta_s = max(0.0, total_imgs - n_images) / max(fps_now, 1e-6)
+                print(
+                    f"\r  [eval][{model_name}] Batch {b_idx + 1}/{total_batches} "
+                    f"({(b_idx + 1) / total_batches * 100:.1f}%) | {n_images}/{total_imgs} imgs | "
+                    f"{fps_now:.1f} imgs/s | ETA {eta_s:.0f}s   ",
+                    end="",
+                    flush=True,
+                )
+
+    del detector, net
+    if dev.type == "cuda":
+        torch.cuda.empty_cache()
+
+    if verbose:
+        print(
+            f"\r  [eval][{model_name}] Inference done: {n_images} imgs in "
+            f"{time.time() - t_start:.1f}s — computing confusion matrix & mAP...   ",
+            flush=True,
+        )
+
     for gt_img, pred_img in zip(all_gt, all_pred):
         _confusion_update(cm, gt_img, pred_img)
 
@@ -508,9 +574,6 @@ def evaluate_generic(
     metrics = compute_map_metrics(all_gt, all_pred, class_names)
     per_class = metrics.get("per_class", [])
     accounting = metrics.get("accounting", {})
-
-    n_params = int(getattr(detector, "num_params", 0) or
-                   sum(p.numel() for p in net.parameters()))
     if timed_images > 0 and t_infer > 0:
         imgs_per_s = timed_images / t_infer
         timing_basis = "forward+decode (post-warmup)"

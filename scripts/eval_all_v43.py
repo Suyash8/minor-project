@@ -107,6 +107,61 @@ def _load_json(path: Path) -> Optional[Dict[str, Any]]:
         return None
 
 
+def _dataset_has_split(root: Path, dataset: str, split: str) -> bool:
+    for rel in (Path(dataset) / split / "images", Path(dataset) / "images" / split):
+        d = root / rel
+        if d.is_dir():
+            try:
+                if any(d.iterdir()):
+                    return True
+            except OSError:
+                pass
+    return False
+
+
+def _resolve_dataset_data_root(
+    dataset: str, split: str, explicit_data_root: Optional[str]
+) -> Optional[str]:
+    """Resolve data_root per dataset so partial NVMe staging (/content/data with
+    only one dataset) still falls back to Drive cleaned_data for other datasets."""
+    if explicit_data_root:
+        return os.path.abspath(os.path.expanduser(explicit_data_root))
+
+    candidates: List[Path] = []
+    env = os.environ.get("VEHICLE_OBB_DATA")
+    if env:
+        candidates.append(Path(env).expanduser())
+    candidates.extend([
+        Path("/content/data"),
+        Path("/content/drive/MyDrive/object-detection/cleaned_data"),
+        REPO_ROOT / "data" / "cleaned_data",
+        REPO_ROOT / "data",
+    ])
+    for cand in candidates:
+        if _dataset_has_split(cand, dataset, split):
+            return str(cand)
+    return common.resolve_data_root(None)
+
+
+def _is_cuda_oom(exc: BaseException, torch_mod: Any) -> bool:
+    if torch_mod is not None:
+        oom_cls = getattr(getattr(torch_mod, "cuda", None), "OutOfMemoryError", None)
+        if oom_cls is not None and isinstance(exc, oom_cls):
+            return True
+    return "out of memory" in str(exc).lower()
+
+
+def _fmt_duration(seconds: float) -> str:
+    s = max(0, int(round(seconds)))
+    if s < 60:
+        return f"{s}s"
+    m, rem = divmod(s, 60)
+    if m < 60:
+        return f"{m}m{rem:02d}s"
+    h, m = divmod(m, 60)
+    return f"{h}h{m:02d}m"
+
+
 def _resolve_runs_dir(explicit: Optional[str]) -> Path:
     if explicit:
         return Path(explicit).expanduser().resolve()
@@ -456,29 +511,53 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = parse_args(argv)
     runs_dir = _resolve_runs_dir(args.runs_dir)
     out_dir = Path(args.out_dir).expanduser().resolve() if args.out_dir else REPO_ROOT
-    data_root = common.resolve_data_root(args.data_root)
     ds_filter = {d.lower().strip() for d in args.datasets} if args.datasets else None
 
     discovered = discover_runs(runs_dir)
-    if not discovered:
+    queue: List[Tuple[Path, Path, str, str, str, int, str]] = []
+    ds_counts: Dict[str, int] = {}
+    for run_dir, weights_path, weights_used in discovered:
+        model, dataset, imgsz = parse_run_metadata(run_dir)
+        if ds_filter is not None and dataset not in ds_filter:
+            continue
+        eff_split = "val" if (dataset == "mock" and args.split == "test") else args.split
+        queue.append((run_dir, weights_path, weights_used, model, dataset, imgsz, eff_split))
+        ds_counts[dataset] = ds_counts.get(dataset, 0) + 1
+
+    print("\n" + "=" * 72, flush=True)
+    print(" vehicle-obb v4.3 full-accounting evaluation (validation-only)", flush=True)
+    print("=" * 72, flush=True)
+    print(f"[eval_all] runs dir   : {runs_dir} ({len(queue)} runs queued)", flush=True)
+    if ds_counts:
+        breakdown = ", ".join(f"{k}={v}" for k, v in sorted(ds_counts.items()))
+        print(f"[eval_all] datasets   : {breakdown}", flush=True)
+    print(
+        f"[eval_all] data root  : "
+        + (os.path.abspath(os.path.expanduser(args.data_root)) if args.data_root
+           else "auto per-dataset (/content/data -> Drive cleaned_data -> repo)"),
+        flush=True,
+    )
+    print(
+        f"[eval_all] settings   : split={args.split} | batch={args.batch} | "
+        f"device={args.device} | quick={args.quick} | force={args.force}",
+        flush=True,
+    )
+    print("-" * 72, flush=True)
+
+    if not queue:
         print(f"[eval_all_v43][warn] No trained runs (best.pt/last.pt) discovered under {runs_dir}", flush=True)
 
     runs_results: List[Dict[str, Any]] = []
     errors: List[Dict[str, Any]] = []
     evaluated_count = 0
     resumed_count = 0
+    eval_times: List[float] = []
     evaluate_mod = None
     torch_mod = None
+    total_runs = len(queue)
 
-    max_batches = max(1, (40 + max(args.batch, 1) - 1) // max(args.batch, 1)) if args.quick else None
-
-    for run_dir, weights_path, weights_used in discovered:
+    for idx, (run_dir, weights_path, weights_used, model, dataset, imgsz, eff_split) in enumerate(queue, 1):
         run_name = run_dir.name
-        model, dataset, imgsz = parse_run_metadata(run_dir)
-        if ds_filter is not None and dataset not in ds_filter:
-            continue
-
-        eff_split = "val" if (dataset == "mock" and args.split == "test") else args.split
         eval_json = run_dir / f"eval_{dataset}_{eff_split}.json"
 
         # RESUME: skip existing valid v4.3 JSON unless --force or --quick
@@ -500,10 +579,20 @@ def main(argv: Optional[List[str]] = None) -> int:
                 runs_results.append(entry)
                 resumed_count += 1
                 print(
-                    _format_progress("resume", run_name, model, dataset, imgsz, 0.0, entry),
+                    f"[{idx:02d}/{total_runs:02d}] "
+                    + _format_progress("resume", run_name, model, dataset, imgsz, 0.0, entry),
                     flush=True,
                 )
                 continue
+
+        ds_data_root = _resolve_dataset_data_root(dataset, eff_split, args.data_root)
+        fam = get_model_family(model)
+        print(
+            f"\n[{idx:02d}/{total_runs:02d}] START {run_name} | model={model} ({fam}) | "
+            f"dataset={dataset}/{eff_split} | weights={weights_used} | imgsz={imgsz} | "
+            f"data_root={ds_data_root}",
+            flush=True,
+        )
 
         # BACKUP prior non-v4.3 (or missing backup) eval JSON before overwriting
         if not args.quick and eval_json.is_file():
@@ -519,21 +608,47 @@ def main(argv: Optional[List[str]] = None) -> int:
             if torch_mod is None:
                 import torch as torch_mod  # type: ignore  # noqa: E402
 
-            res = _run_with_v43_capture(
-                evaluate_mod=evaluate_mod,
-                run_dir=run_dir,
-                weights_path=weights_path,
-                dataset=dataset,
-                split=eff_split,
-                model_name=model,
-                imgsz=imgsz,
-                batch=args.batch,
-                device=args.device,
-                data_root=data_root,
-                max_batches=max_batches,
-                save=(not args.quick),
-            )
+            eff_batch = max(1, int(args.batch))
+            while True:
+                eff_max_batches = (
+                    max(1, (40 + eff_batch - 1) // eff_batch) if args.quick else None
+                )
+                try:
+                    res = _run_with_v43_capture(
+                        evaluate_mod=evaluate_mod,
+                        run_dir=run_dir,
+                        weights_path=weights_path,
+                        dataset=dataset,
+                        split=eff_split,
+                        model_name=model,
+                        imgsz=imgsz,
+                        batch=eff_batch,
+                        device=args.device,
+                        data_root=ds_data_root,
+                        max_batches=eff_max_batches,
+                        save=(not args.quick),
+                    )
+                    break
+                except Exception as inner_exc:
+                    if _is_cuda_oom(inner_exc, torch_mod) and eff_batch > 1:
+                        gc.collect()
+                        try:
+                            if torch_mod.cuda.is_available():
+                                torch_mod.cuda.empty_cache()
+                        except Exception:
+                            pass
+                        next_batch = max(1, eff_batch // 2)
+                        print(
+                            f"[oom-recovery] {run_name} hit CUDA OOM at batch={eff_batch}; "
+                            f"retrying with batch={next_batch}",
+                            flush=True,
+                        )
+                        eff_batch = next_batch
+                        continue
+                    raise
+
             elapsed = time.time() - t0
+            eval_times.append(elapsed)
 
             res["metric_version"] = METRIC_VERSION
             res["evaluated_from"] = weights_used
@@ -554,21 +669,37 @@ def main(argv: Optional[List[str]] = None) -> int:
             entry["run"] = run_name
             runs_results.append(entry)
             evaluated_count += 1
+            remaining = total_runs - idx
+            eta_note = (
+                f" | ETA ~{_fmt_duration((sum(eval_times) / len(eval_times)) * remaining)}"
+                if remaining > 0 and eval_times
+                else ""
+            )
             tag = "quick" if args.quick else "eval"
             print(
-                _format_progress(tag, run_name, model, dataset, imgsz, elapsed, entry),
+                f"[{idx:02d}/{total_runs:02d}] "
+                + _format_progress(tag, run_name, model, dataset, imgsz, elapsed, entry)
+                + f" | ok={evaluated_count} err={len(errors)} skip={resumed_count}{eta_note}",
                 flush=True,
             )
         except Exception as exc:
+            elapsed = time.time() - t0
             traceback.print_exc()
+            err_msg = f"{type(exc).__name__}: {exc}"
             errors.append(
                 {
                     "run": run_name,
                     "dataset": dataset,
                     "model": model,
                     "weights_used": weights_used,
-                    "error": f"{type(exc).__name__}: {exc}",
+                    "error": err_msg,
                 }
+            )
+            short_err = err_msg.splitlines()[0][:180]
+            print(
+                f"[{idx:02d}/{total_runs:02d}] [FAIL] {run_name} in {elapsed:.1f}s "
+                f"| ok={evaluated_count} err={len(errors)} skip={resumed_count} | {short_err}",
+                flush=True,
             )
             if torch_mod is not None:
                 try:

@@ -18,6 +18,7 @@ from __future__ import annotations
 import csv
 import json
 import math
+import os
 import subprocess
 import sys
 import tempfile
@@ -391,9 +392,80 @@ def test_eval_all_v43_end_to_end() -> None:
     print("[ok] test_eval_all_v43_end_to_end PASS")
 
 
+def test_per_dataset_data_root_and_oom_retry() -> None:
+    import unittest.mock
+    from scripts import eval_all_v43
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        nvme = root / "nvme"
+        drive = root / "drive"
+        (nvme / "codrone" / "test" / "images").mkdir(parents=True)
+        (nvme / "codrone" / "test" / "images" / "a.jpg").write_bytes(b"x")
+        (drive / "dota" / "test" / "images").mkdir(parents=True)
+        (drive / "dota" / "test" / "images" / "b.jpg").write_bytes(b"y")
+
+        # Simulate /content/data having codrone only, Drive having dota
+        orig_resolve = eval_all_v43._resolve_dataset_data_root
+
+        # Test _dataset_has_split directly + explicit override preservation + env fallback
+        assert eval_all_v43._dataset_has_split(nvme, "codrone", "test")
+        assert not eval_all_v43._dataset_has_split(nvme, "dota", "test")
+        assert eval_all_v43._dataset_has_split(drive, "dota", "test")
+        assert orig_resolve("dota", "test", str(nvme)) == str(nvme.resolve())
+        with unittest.mock.patch.dict(os.environ, {"VEHICLE_OBB_DATA": str(drive)}):
+            assert orig_resolve("dota", "test", None) == str(drive)
+
+        # Test OOM batch-halving retry in eval_all_v43.main
+        runs_dir = root / "runs"
+        out_dir = root / "out"
+        rd = runs_dir / "train" / "codrone_std"
+        (rd / "weights").mkdir(parents=True)
+        (rd / "weights" / "best.pt").write_bytes(b"w")
+        (rd / "run_manifest.json").write_text(json.dumps({"model": "std", "dataset": "codrone"}))
+
+        seen_batches = []
+
+        def fake_capture(**kw):
+            b = kw["batch"]
+            seen_batches.append(b)
+            if b > 2:
+                raise RuntimeError("CUDA out of memory. Tried to allocate 32.00 GiB")
+            return {
+                "model": "std", "family": "dense", "dataset": "codrone", "split": "test",
+                "imgsz": 1024, "map50": 0.1, "map75": 0.05, "map50_95": 0.04,
+                "ap_small": 0.01, "ap_medium": 0.02, "ap_large": 0.03,
+                "parameters": 1000, "imgs_per_sec": 5.0, "speed_ms": {"inference": 200.0},
+                "per_class": [{"class_id": 0, "name": "car", "instances": 1, "tp": 1, "fp": 0, "fn": 0,
+                               "precision": 1.0, "recall": 1.0, "f1": 1.0, "iou_mean": 0.8,
+                               "ap50": 1.0, "ap75": 1.0, "ap50_95": 0.9, "ap_small": 0.0,
+                               "ap_medium": 1.0, "ap_large": 0.0}],
+                "accounting": {"instances": 1, "predictions": 1, "tp": 1, "fp": 0, "fn": 0,
+                               "macro_precision": 1.0, "macro_recall": 1.0, "macro_f1": 1.0,
+                               "iou_mean": 0.8, "iou_pairs": 1, "classes_with_gt": 1},
+            }
+
+        with unittest.mock.patch.object(eval_all_v43, "_run_with_v43_capture", side_effect=fake_capture):
+            rc = eval_all_v43.main([
+                "--runs-dir", str(runs_dir),
+                "--data-root", str(nvme),
+                "--out-dir", str(out_dir),
+                "--split", "test",
+                "--batch", "8",
+                "--device", "cpu",
+            ])
+        assert rc == 0
+        assert seen_batches == [8, 4, 2], seen_batches
+        out_json = json.loads((out_dir / "runs_v4_full_metrics.json").read_text())
+        assert out_json["n_runs"] == 1 and out_json["n_errors"] == 0
+
+    print("[ok] test_per_dataset_data_root_and_oom_retry PASS")
+
+
 if __name__ == "__main__":
     test_exact_accounting_scenario()
     test_early_returns_and_single_class()
     test_regression_identity_vs_pre_v43()
     test_eval_all_v43_end_to_end()
+    test_per_dataset_data_root_and_oom_retry()
     print("ALL v4.3 FULL-ACCOUNTING TESTS PASSED")

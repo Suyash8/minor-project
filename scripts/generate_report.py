@@ -96,6 +96,11 @@ def _predict_samples(rec: dict, data_root: str, n: int, device: str,
         raise FileNotFoundError(f"No {rec['eval_on']} {rec['split']} images under {data_root}")
     class_names = list(raw.class_names)
     nc = len(class_names)
+    from src.data.class_space import schema_for_weights
+    schema = schema_for_weights(weights)
+    head_nc = len(schema["class_names"]) if schema else nc
+    head_map = ([class_names.index(name) if name in class_names else -1
+                 for name in schema["class_names"]] if schema else list(range(nc)))
     idxs = np.linspace(0, len(raw) - 1, num=min(n, len(raw)), dtype=int)
     imgsz = int(rec["imgsz"] or 1280)
     samples = []
@@ -103,6 +108,10 @@ def _predict_samples(rec: dict, data_root: str, n: int, device: str,
     if rec["family"] == "yolo":
         from ultralytics import YOLO
         model = YOLO(weights)
+        if schema is None:
+            names = model.names
+            head_map = [class_names.index(names[i]) if names[i] in class_names else -1
+                        for i in range(len(names))]
         dev = "cpu" if device == "cpu" else (0 if device in ("auto", "cuda")
                                              else device)
         for i in idxs:
@@ -116,7 +125,8 @@ def _predict_samples(rec: dict, data_root: str, n: int, device: str,
                 cls = res.obb.cls.cpu().numpy().astype(int)
                 cf = res.obb.conf.cpu().numpy()
                 suite = [ultralytics_xywhr_to_suite(*map(float, r)) for r in xywhr]
-                pred = [(int(c), float(p), b) for c, p, b in zip(cls, cf, suite)]
+                pred = [(head_map[int(c)], float(p), b) for c, p, b in zip(cls, cf, suite)
+                        if head_map[int(c)] >= 0]
             samples.append(dict(image=img, pred=pred,
                                 gt=_gt_items(raw, int(i), w, h, nc),
                                 name=f"#{int(i)}"))
@@ -132,7 +142,7 @@ def _predict_samples(rec: dict, data_root: str, n: int, device: str,
 
     dev = torch.device("cuda" if device in ("auto", "cuda")
                        and torch.cuda.is_available() else "cpu")
-    det = get_model(rec["model"], device=str(dev), num_classes=nc)
+    det = get_model(rec["model"], device=str(dev), num_classes=head_nc)
     det.load(weights_path=weights)
     net = det.net.to(dev).eval()
     ds = UnifiedOBBDataset(raw, img_size=imgsz, augment=False,
@@ -145,13 +155,18 @@ def _predict_samples(rec: dict, data_root: str, n: int, device: str,
                 out = net(x)
                 lg, bx, an = extract_detr_predictions(out, model_name=rec["model"])
                 dec = decode_detr(lg.float(), bx.float(), an.float(),
-                                  img_size=imgsz, num_classes=nc,
+                                  img_size=imgsz, num_classes=head_nc,
                                   conf_thresh=conf, nms_iou=0.45)
             else:
-                cl, rg, _a, _b = forward_dense_network(rec["model"], net, x, nc)
+                cl, rg, _a, _b = forward_dense_network(rec["model"], net, x, head_nc)
                 dec = decode_dense_grid(cl.float(), rg.float(), img_size=imgsz,
                                         conf_thresh=conf, nms_iou=0.45)
-            per = to_metric_format(dec, nc)[0]
+            mapped = []
+            for boxes, scores, labels in dec:
+                ids = np.asarray(head_map)[labels]
+                keep = ids >= 0
+                mapped.append((boxes[keep], scores[keep], ids[keep]))
+            per = to_metric_format(mapped, nc)[0]
             ow, oh = (int(v) for v in tg[0]["orig_size"])
             pred = []
             for c in range(nc):

@@ -121,7 +121,7 @@ def create_mock_dataset(
     dataset_dir = Path(output_dir) / dataset_name
     class_names = DATASET_CLASSES.get(dataset_name.lower(), ["car", "van", "truck", "bus", "pedestrian"])
 
-    for split, count in [("train", num_train), ("val", num_val)]:
+    for split, count in [("train", num_train), ("val", num_val), ("test", num_val)]:
         split_img_dir = dataset_dir / "images" / split
         split_lbl_dir = dataset_dir / "labels" / split
         split_img_dir.mkdir(parents=True, exist_ok=True)
@@ -155,6 +155,7 @@ def create_mock_dataset(
     yaml_content = f"""path: {dataset_dir.resolve()}
 train: images/train
 val: images/val
+test: images/test
 names:
 """
     for i, name in enumerate(class_names):

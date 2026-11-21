@@ -40,12 +40,15 @@ def _cleaned_yaml_if_present(ds_dir: Path, ds: str, out_yaml: Path) -> Optional[
     )
     if not cleaned:
         return None
-    classes = CLEANED_DATASET_CLASSES[ds]
+    schema_file = ds_dir / "class_schema.json"
+    import json
+    classes = (json.loads(schema_file.read_text())["class_names"]
+               if schema_file.exists() else CLEANED_DATASET_CLASSES[ds])
     yaml_dict = {
         "path": str(ds_dir),
         "train": "train/images",
         "val": "val/images",
-        "test": "test/images" if (ds_dir / "test" / "images").is_dir() else "val/images",
+        "test": "test/images",
         "names": {i: c for i, c in enumerate(classes)},
     }
     with open(out_yaml, "w", encoding="utf-8") as f:

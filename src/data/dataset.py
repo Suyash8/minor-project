@@ -132,6 +132,10 @@ class AerialOBBDataset:
 
         self.samples = []
         self._discover_samples(max_samples)
+        schema_file = self.data_dir / "class_schema.json"
+        if schema_file.exists():
+            self.class_names = json.loads(schema_file.read_text())["class_names"]
+            self.class_to_idx = {name: i for i, name in enumerate(self.class_names)}
         if self.use_cache:
             self._ann_cache = self._load_or_build_cache()
 
@@ -363,7 +367,9 @@ class AerialOBBDataset:
             # The cleaned v4.1 build emits a single unified 8-class space in
             # YOLO-OBB polygon format; re-target class names so the dense/DETR
             # engines train on exactly the same labels as the Ultralytics suite.
-            cleaned_names = CLEANED_DATASET_CLASSES.get(self.dataset_name)
+            schema_file = self.data_dir / "class_schema.json"
+            cleaned_names = (json.loads(schema_file.read_text())["class_names"]
+                             if schema_file.exists() else CLEANED_DATASET_CLASSES.get(self.dataset_name))
             if cleaned_names:
                 from src.data.schema import validate_names
                 validate_names(self.data_dir, cleaned_names)

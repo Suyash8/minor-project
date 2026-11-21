@@ -209,6 +209,23 @@ def train_model(
     mirror_dir, staging, run_dir, ...) pass straight through to the engines.
     """
     model_name = canonicalize_model_name(model_name)
+    from src.data.class_space import prepare_class_view, save_schema
+    from training.common import resolve_data_root
+    staging = kwargs.get("staging")
+    if staging is not None:
+        print("[classes] waiting for a complete local staged inventory before compacting labels")
+        if not staging.wait():
+            raise RuntimeError("Dataset staging failed; refusing a partial compact training view")
+        data_dir = staging.dst_root
+    data_dir, class_schema = prepare_class_view(dataset_name, resolve_data_root(data_dir))
+    if kwargs.get("run_dir"):
+        if resume and kwargs.get("mirror_dir"):
+            from src.training.engine_common import restore_from_mirror
+            from pathlib import Path
+            restore_from_mirror(kwargs["mirror_dir"], f"{dataset_name}_{model_name}", Path(kwargs["run_dir"]))
+        save_schema(kwargs["run_dir"], class_schema, resume=resume)
+    # A compact view is complete; the old staging resolver refers to original IDs.
+    kwargs.pop("staging", None)
     family = get_model_family(model_name)
     tuned = apply_tuned_defaults(
         model_name, epochs=epochs, lr=lr, weight_decay=weight_decay,

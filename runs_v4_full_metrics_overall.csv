@@ -1,0 +1,1 @@
+run,dataset,model,family,weights_used,imgsz,map50,map75,map50_95,ap_small,ap_medium,ap_large,macro_precision,macro_recall,macro_f1,iou_mean,iou_pairs,instances,predictions,tp,fp,fn,speed_ms_inference,imgs_s,parameters_m,angle_mae

@@ -34,7 +34,7 @@ DEFAULT_MIRROR_DIR = "/content/drive/MyDrive/object-detection/runs_v4"
 STATE_FILENAME = "pipeline_state.json"
 KNOWN_DATASETS = ("visdrone", "codrone", "dota", "mock", "all")
 _FILES = ("last.pt", "best.pt", "results.csv", "epochs.jsonl", "train.log",
-          "run_manifest.json", "bundle_manifest.json")
+          "run_manifest.json", "bundle_manifest.json", "class_schema.json")
 
 
 def _sha256_file(path: Path) -> str:

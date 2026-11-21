@@ -62,7 +62,7 @@ def main() -> None:
     from training import run
 
     argv = ["--models", *a.models, "--datasets", *a.datasets,
-            "--mode", "train", "--device", a.device,
+            "--mode", "full", "--device", a.device,
             "--workers", str(a.workers), "--seed", str(a.seed),
             "--runs-dir", a.runs_dir]
     if a.epochs is not None:

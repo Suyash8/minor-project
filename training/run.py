@@ -59,7 +59,7 @@ PIPELINE_VERSION = "4.2.0"
 STATE_FILENAME = "pipeline_state.json"
 STEPS = ["stage", "train", "eval", "cross", "summary", "export", "report"]
 MODE_PRESETS = {
-    "full": ["stage", "train", "eval", "cross", "summary", "report"],
+    "full": ["stage", "train", "eval", "cross", "summary", "export", "report"],
     "train": ["stage", "train"],
     "eval": ["eval", "summary"],
 }
@@ -224,7 +224,7 @@ def apply_test_overrides(args: argparse.Namespace) -> None:
 
 def ensure_mock_data(data_root: str) -> None:
     mock_dir = Path(data_root) / "mock"
-    if (mock_dir / "images" / "train").is_dir():
+    if (mock_dir / "images" / "train").is_dir() and (mock_dir / "images" / "test").is_dir():
         return
     print("[pipeline] generating mock dataset (no GPU / no data path, W8.6)")
     from tests.mock_data import create_mock_dataset
@@ -405,6 +405,9 @@ def run_train_job(dataset: str, model: str, args: argparse.Namespace,
             test_mode=args.test,
             cache_mode=args.cache,
         )
+        schema_path = Path(run_dir) / "class_schema.json"
+        if schema_path.exists():
+            manifest["class_schema"] = json.loads(schema_path.read_text())
         state.set_job(dataset, model, status="done", error=None, traceback=None)
         result["wall_time_s"] = round(time.time() - t0, 1)
         ended_at = datetime.now(timezone.utc).isoformat()
@@ -481,7 +484,7 @@ def mirror_run_metadata(run_dir, mirror_dir):
     mirror = DriveMirror(mirror_dir, run_subdir=Path(run_dir).name)
     for file in Path(run_dir).iterdir():
         if file.is_file() and (
-            file.name in ("run_manifest.json", "bundle_manifest.json")
+            file.name in ("run_manifest.json", "bundle_manifest.json", "class_schema.json")
             or file.name.startswith("eval_")
         ):
             mirror.submit(file)
@@ -542,6 +545,10 @@ def run_eval_step(datasets: List[str], models: List[str],
                 continue
             run_dir = job.get("run_dir") or _resolve_run_dir(args, ds, m)
             try:
+                # Re-evaluate selected best weights on validation, then held-out test.
+                evaluate_run(run_dir=run_dir, dataset=ds, split="val",
+                             imgsz=(args.img_size or None), batch=args.batch or 8,
+                             device=args.device, data_root=eval_root, test_mode=args.test)
                 evaluate_run(
                     run_dir=run_dir, dataset=ds, split="test",
                     imgsz=(args.img_size or None),  # None -> trained img_size from manifest (review A5)
@@ -581,15 +588,18 @@ def run_suite_step(step: str, datasets: List[str], models: List[str],
         elif step == "export":
             # check=True (review D): a failed export must not be recorded as
             # "done" in the pipeline state.
-            subprocess.run([sys.executable, "scripts/export_results.py"],
+            subprocess.run([sys.executable, "scripts/export_results.py",
+                            "--results-root", args.runs_dir,
+                            "--output-dir", str(Path(args.runs_dir) / "excel_export")],
                            cwd=str(REPO_ROOT), check=True)
         elif step == "report":
-            cmd = [sys.executable, "scripts/generate_report.py", "--runs-dir", args.runs_dir]
+            cmd = [sys.executable, "scripts/generate_report.py", "--runs-dir", args.runs_dir,
+                   "--datasets", *datasets, "--split", "test",
+                   "--results-dir", str(Path(args.runs_dir) / "report"), "--device", args.device]
             if args.data_dir:
                 cmd += ["--data-root", args.data_dir]
             if args.test:
-                cmd += ["--datasets", "mock", "--split", "val", "--device", "cpu",
-                        "--results-dir", str(Path(args.runs_dir)/"test_report")]
+                cmd += ["--qualitative-samples", "2"]
             subprocess.run(cmd, cwd=str(REPO_ROOT), check=True)
         state.set_suite_step(step, "done")
         if step == "summary" and args.mirror_dir:
@@ -772,6 +782,14 @@ def main(argv: Optional[List[str]] = None) -> int:
                 for m in models:
                     job = state.job(ds, m)
                     if args.auto_resume and job["status"] == "done":
+                        from src.data.class_space import prepare_class_view, save_schema
+                        handle = handles.get(ds)
+                        if handle is not None and not handle.wait():
+                            raise RuntimeError("Cannot verify completed job against incomplete staging")
+                        root = handle.dst_root if handle is not None else args.data_dir
+                        _, current_schema = prepare_class_view(ds, common.resolve_data_root(root))
+                        save_schema(job.get("run_dir") or _resolve_run_dir(args, ds, m),
+                                    current_schema, resume=True)
                         # Target-epoch-aware resume: if user requests more epochs than
                         # previously trained (e.g. tuned default 60/80 vs early 20-epoch run),
                         # resume and continue rather than skipping.

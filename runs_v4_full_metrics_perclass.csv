@@ -1,0 +1,1 @@
+run,dataset,model,class_id,class,instances,tp,fp,fn,precision,recall,f1,iou_mean,ap50,ap75,ap50_95,ap_small,ap_medium,ap_large

@@ -104,6 +104,14 @@ def _load_eval_checkpoints(run_dir: Path, run_name: str):
     """Rows from checkpoints/<dataset>_<model>_<phase>_eval.json."""
     rows = []
     ckpt_dir = run_dir / "checkpoints"
+    # Unified v4 results are top-level eval_<dataset>_<split>.json files.
+    for file in sorted(run_dir.glob("eval_*_test.json")):
+        data = json.loads(file.read_text())
+        row = {c: _clean(data.get(c)) for c in METRIC_COLS}
+        row.update(run=run_name, run_dir=str(run_dir), run_timestamp=_run_timestamp(run_dir),
+                   phase="post_train", model=data.get("model"), dataset=data.get("dataset"),
+                   total_gt_boxes=data.get("accounting", {}).get("instances"))
+        rows.append(row)
     if not ckpt_dir.is_dir():
         return rows
     for f in sorted(ckpt_dir.glob("*_eval.json")):
@@ -196,6 +204,16 @@ def _load_benchmark_csvs(run_dir: Path, run_name: str):
 def _load_class_wise(run_dir: Path, run_name: str):
     """Per-class rows: repo class_wise_results CSVs + cross-eval per_class/."""
     rows = []
+    for file in sorted(run_dir.glob("eval_*_test.json")):
+        data = json.loads(file.read_text())
+        for item in data.get("per_class", []):
+            rows.append(dict(run=run_name, run_dir=str(run_dir), phase="post_train",
+                model=data.get("model"), dataset=data.get("dataset"), source_dataset=None,
+                eval_dataset=data.get("dataset"), **{"class": item.get("name")},
+                AP50=item.get("ap50"), AP75=item.get("ap75"),
+                **{"AP50-95": item.get("ap50_95")}, TP=item.get("tp"),
+                FP=item.get("fp"), FN=item.get("fn"), Precision=item.get("precision"),
+                Recall=item.get("recall"), F1=item.get("f1"), total_instances=item.get("instances")))
     # 1. repo-style class_wise_results_*.csv (inside the run dir OR its parent root)
     candidates = sorted(run_dir.rglob("class_wise_results_*.csv"))
     parent = run_dir.parent

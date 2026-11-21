@@ -38,95 +38,20 @@ import common  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
-# Ultralytics YOLO-OBB path (unchanged protocol; Ultralytics computes the
-# metrics for its own models with its native val()).
+# YOLO compatibility entry. All paths use the same class-aware shared metrics.
 # ---------------------------------------------------------------------------
 def evaluate_weights(weights: str, dataset: str, split: str = "test",
                      data_root: str | None = None, imgsz: int = 1280,
                      batch: int = 16, device: str | None = None,
                      out_dir: str | None = None, stage_local: bool = False,
                      save: bool = True, verbose: bool = True) -> dict:
-    """Run Ultralytics val() on one dataset/split; return (and optionally
-    save + print) a structured result dict."""
-    from ultralytics import YOLO
-
+    """Compatibility entry, using the class-aware shared evaluator for all YOLO weights."""
     data_root = common.resolve_data_root(data_root)
-    if dataset == "mock":
-        # CI dataset: use the YAML written by create_mock_dataset verbatim
-        cand = os.path.join(data_root, "mock", "mock.yaml")
-        if not os.path.isfile(cand):
-            raise FileNotFoundError(f"mock dataset yaml not found: {cand}")
-        ds_yaml = cand
-    elif stage_local:
-        data_root, ds_yaml = common.stage_local(dataset, data_root)
-    else:
-        ds_yaml = common.ensure_dataset_yaml(dataset, data_root)
-
-    model = YOLO(weights)
-    val_name = f"eval_{dataset}_{split}"
-    m = model.val(data=ds_yaml, split=split, imgsz=imgsz, batch=batch,
-                  device=device, workers=0 if device == "cpu" else 8,
-                  plots=True, verbose=False,
-                  project=out_dir or os.path.dirname(os.path.abspath(weights)),
-                  name=val_name, exist_ok=True)
-
-    box = m.box
-    per_class = []
-    for i, cidx in enumerate(box.ap_class_index):
-        p, r, ap50, ap = box.class_result(i)
-        c = int(cidx)
-        per_class.append(dict(class_id=c,
-                              name=common.CLASSES[c] if c < len(common.CLASSES) else f"cls{c}",
-                              precision=round(float(p), 4),
-                              recall=round(float(r), 4),
-                              ap50=round(float(ap50), 4),
-                              ap50_95=round(float(ap), 4)))
-    per_class.sort(key=lambda d: d["class_id"])
-
-    n_params = sum(p.numel() for p in model.model.parameters())
-    res = dict(
-        weights=os.path.abspath(weights), weights_fingerprint=common.weights_fingerprint(weights),
-        dataset=dataset, split=split, imgsz=imgsz,
-        overall={k: round(float(v), 5) for k, v in m.results_dict.items()
-                 if isinstance(v, (int, float))},
-        map50=round(float(box.map50), 5),
-        map50_95=round(float(box.map), 5),
-        map75=round(float(box.map75), 5),
-        speed_ms={k: round(float(v), 2) for k, v in (m.speed or {}).items()},
-        parameters=int(n_params),
-        per_class=per_class,
-        gt_instances=common.count_instances(dataset, data_root, split),
-        timestamp=datetime.now(timezone.utc).isoformat(),
-    )
-
-    if save:
-        out_dir = out_dir or os.path.dirname(os.path.abspath(weights))
-        out = os.path.join(out_dir, f"eval_{dataset}_{split}.json")
-        os.makedirs(out_dir, exist_ok=True)
-        with open(out, "w") as f:
-            json.dump(res, f, indent=2)
-        res["json_path"] = out
-
-    if verbose:
-        print(f"\n=== {os.path.basename(weights)} on {dataset}/{split} "
-              f"(imgsz={imgsz}) ===")
-        print(f"mAP50: {res['map50']:.4f}   mAP50-95: {res['map50_95']:.4f}   "
-              f"mAP75: {res['map75']:.4f}   params: {n_params/1e6:.2f}M")
-        if res["speed_ms"]:
-            sp = res["speed_ms"]
-            print("speed(ms): " + "  ".join(f"{k}={v}" for k, v in sp.items()))
-        print(f"{'class':<14}{'GT':>7}{'P':>8}{'R':>8}{'AP50':>8}{'AP50-95':>9}")
-        for d in per_class:
-            print(f"{d['name']:<14}{res['gt_instances'].get(d['name'], 0):>7}"
-                  f"{d['precision']:>8.3f}{d['recall']:>8.3f}"
-                  f"{d['ap50']:>8.3f}{d['ap50_95']:>9.3f}")
-        missing = [c for c in common.CLASSES
-                   if c not in {d["name"] for d in per_class}]
-        if missing:
-            print("classes with no predictions/GT in this split:", missing)
-        if save:
-            print("saved ->", res.get("json_path"))
-    return res
+    if stage_local:
+        data_root, _ = common.stage_local(dataset, data_root)
+    return evaluate_yolo_unified(weights=weights, dataset=dataset, split=split,
+                                 data_root=data_root, imgsz=imgsz, batch=batch,
+                                 device=device, out_dir=out_dir, save=save, verbose=verbose)
 
 
 def evaluate_yolo_unified(
@@ -167,12 +92,17 @@ def evaluate_yolo_unified(
         device = "0" if torch.cuda.is_available() else "cpu"
 
     dev = torch.device("cuda:0" if str(device) in ("0", "cuda") else str(device))
+    from src.data.class_space import schema_for_weights
+    head_schema = schema_for_weights(weights)
     raw = AerialOBBDataset(dataset_name=dataset, data_dir=data_root, split=split)
     if len(raw) == 0:
         raise FileNotFoundError(f"No {dataset}/{split} images under {data_root}")
     class_names = list(raw.class_names)
     num_classes = len(class_names)
     model = YOLO(weights)
+    if head_schema is None:
+        names = model.names
+        head_schema = {"class_names": [names[i] for i in range(len(names))]}
 
     indices = list(range(len(raw)))
     if max_batches is not None:
@@ -235,6 +165,11 @@ def evaluate_yolo_unified(
                 conf = obb.conf.cpu().numpy()
                 cls = obb.cls.cpu().numpy().astype(int)
                 for (cx, cy, w, h, ar), s, c in zip(xywhr, conf, cls):
+                    if head_schema:
+                        name = head_schema["class_names"][c]
+                        if name not in class_names:
+                            continue
+                        c = class_names.index(name)
                     if 0 <= c < num_classes:
                         # Verified conversion (synthetic round-trip test in
                         # tests/test_v4_units.py): same rectangle as the
@@ -459,6 +394,8 @@ def evaluate_generic(
     else:
         dev = torch.device(device)
 
+    from src.data.class_space import schema_for_weights
+    head_schema = schema_for_weights(weights)
     raw = AerialOBBDataset(dataset_name=dataset, data_dir=data_root, split=split)
     if len(raw) == 0:
         raise FileNotFoundError(f"No {dataset}/{split} images under {data_root}")
@@ -470,7 +407,8 @@ def evaluate_generic(
                         collate_fn=obb_collate_fn, num_workers=0,
                         pin_memory=(dev.type == "cuda"))
 
-    detector = get_model(model_name, device=str(dev), num_classes=num_classes)
+    head_num_classes = len(head_schema["class_names"]) if head_schema else num_classes
+    detector = get_model(model_name, device=str(dev), num_classes=head_num_classes)
     detector.load(weights_path=weights)
     net = detector.net.to(dev)
     net.eval()
@@ -514,11 +452,11 @@ def evaluate_generic(
                     decoded = decode_detr(
                         pred_logits.float(), pred_boxes.float(),
                         pred_angles.float(), img_size=imgsz,
-                        num_classes=num_classes, conf_thresh=conf_thresh,
+                        num_classes=head_num_classes, conf_thresh=conf_thresh,
                         nms_iou=iou_thresh)
                 else:
                     cls_logits, reg_preds, _fh, _fw = forward_dense_network(
-                        model_name, net, imgs, num_classes)
+                        model_name, net, imgs, head_num_classes)
                     decoded = decode_dense_grid(
                         cls_logits.float(), reg_preds.float(), img_size=imgsz,
                         conf_thresh=conf_thresh, nms_iou=iou_thresh)
@@ -532,6 +470,17 @@ def evaluate_generic(
             # frame; GT comes straight from the dataset in original
             # coordinates (identical at every imgsz, never min-box
             # filtered), so area bands and mAP compare across families.
+            if head_schema:
+                # Compact heads are scattered into the original dataset metric space.
+                import numpy as _np
+                id_map = _np.asarray([class_names.index(n) if n in class_names else -1
+                                      for n in head_schema["class_names"]])
+                mapped = []
+                for boxes, scores, labels in decoded:
+                    ids = id_map[labels]
+                    keep = ids >= 0
+                    mapped.append((boxes[keep], scores[keep], ids[keep]))
+                decoded = mapped
             batch_pred = to_metric_format(decoded, num_classes)
             for pred_img, tgt in zip(batch_pred, targets):
                 ow, oh = (int(v) for v in tgt["orig_size"])
@@ -675,8 +624,6 @@ def evaluate_run(run_dir: str, dataset: str, split: str = "test",
     """
     from src.training.dispatcher import get_model_family
 
-    if dataset == "mock" and split == "test":
-        split = "val"  # the generated mock set ships train/val only
     weights = common.find_weights(run_dir)
     model_name = _model_for_run(run_dir, weights, model_name)
     family = get_model_family(model_name)

@@ -209,6 +209,9 @@ def save_training_checkpoint(path: Path, **payload: Any) -> None:
     """Atomic checkpoint write (tmp + os.replace; W4.8)."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
+    schema_file = path.parent / "class_schema.json"
+    if schema_file.exists():
+        payload["class_schema"] = json.loads(schema_file.read_text())
     tmp = path.with_name(path.name + ".tmp")
     torch.save(payload, tmp)
     os.replace(tmp, path)
@@ -423,7 +426,7 @@ def restore_from_mirror(mirror_dir: Optional[str], run_subdir: str,
         verify_bundle_best,
     )
     restored: List[str] = []
-    names = ("last.pt", "best.pt", "results.csv", "epochs.jsonl", "train.log", "run_manifest.json", "bundle_manifest.json")
+    names = ("last.pt", "best.pt", "results.csv", "epochs.jsonl", "train.log", "run_manifest.json", "bundle_manifest.json", "class_schema.json")
     names += tuple(p.name for p in src_dir.glob("eval_*.json"))
     best_verified = verify_bundle_best(src_dir)
     for name in names:

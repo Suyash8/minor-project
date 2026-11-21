@@ -56,6 +56,7 @@ def main() -> int:
     p.add_argument("--resume", help="checkpoint paths are auto-resumed in v4; "
                    "this flag only forces resume on")
     p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--no-auto-resume", action="store_true")
     a = p.parse_args()
 
     if a.cfg:
@@ -89,6 +90,8 @@ def main() -> int:
     if a.data_root:
         argv += ["--data-dir", a.data_root]
 
+    if a.no_auto_resume:
+        argv += ["--no-auto-resume"]
     if a.dry_run:
         from src.config import resolve_model_names
         from src.training.dispatcher import apply_tuned_defaults
